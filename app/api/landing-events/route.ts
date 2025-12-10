@@ -2,27 +2,35 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// 👉 ahora también acepta "conversion"
+export const dynamic = "force-dynamic";
+
+// 👉 tipos que usamos en el body
 type EventType = "visit" | "click" | "chat" | "conversion";
+
+interface LandingEventPayload {
+  eventType: EventType;
+  landingId: string;
+  buttonId?: string | null;
+  waPhone?: string | null;
+  amount?: number | null;
+  screenshotUrl?: string | null;
+}
+
+// ========================
+//  Endpoint principal
+// ========================
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = (await req.json()) as LandingEventPayload;
 
     const {
       eventType,
       landingId,
       buttonId,
       waPhone,
-      amount,        // monto opcional (conversion)
-      screenshotUrl, // URL de la foto del comprobante
-    }: {
-      eventType: EventType;
-      landingId: string;
-      buttonId?: string | null;
-      waPhone?: string | null;
-      amount?: number | null;
-      screenshotUrl?: string | null;
+      amount,
+      screenshotUrl,
     } = body;
 
     if (!landingId || !eventType) {
@@ -33,10 +41,8 @@ export async function POST(req: NextRequest) {
     }
 
     const ipHeader = req.headers.get("x-forwarded-for") || "";
-    const visitorIp = ipHeader.split(",")[0] || null;
+    const visitorIp = ipHeader.split(",")[0]?.trim() || null;
     const userAgent = req.headers.get("user-agent") || null;
-
-    const waLineId = process.env.WA_DEFAULT_LINE_ID || null;
 
     // ========================
     // 1) Guardar evento en DB
@@ -46,16 +52,18 @@ export async function POST(req: NextRequest) {
       event_type: eventType,
       button_id: buttonId ?? null,
       wa_phone: waPhone ?? null,
-      wa_line_id: waLineId,
-      visitor_ip: visitorIp,
-      amount: amount ?? null,
+      amount:
+        typeof amount === "number" && !Number.isNaN(amount) ? amount : null,
       screenshot_url: screenshotUrl ?? null,
+      visitor_ip: visitorIp,
+      user_agent: userAgent,
+      // wa_line_id ya NO se envía → tu tabla no lo tiene
     });
 
     if (error) {
       console.error("[landing-events] Error insertando evento:", error);
       return NextResponse.json(
-        { ok: false, error: error.message },
+        { ok: false, error: "Error al guardar evento" },
         { status: 500 }
       );
     }
@@ -63,20 +71,21 @@ export async function POST(req: NextRequest) {
     // ========================
     // 2) Enviar a Meta CAPI
     //    - conversion  -> Purchase
-    //    - chat        -> Contact (mensaje/conversación)
+    //    - chat        -> Contact
     // ========================
     if (eventType === "conversion" || eventType === "chat") {
       await sendMetaEvent({
         landingId,
         eventType,
-        amount: amount ?? null,
+        amount:
+          typeof amount === "number" && !Number.isNaN(amount) ? amount : null,
         visitorIp,
         userAgent,
         waPhone: waPhone ?? null,
       });
     }
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch (e: any) {
     console.error("[landing-events] Excepción:", e);
     return NextResponse.json(
@@ -123,8 +132,8 @@ async function sendMetaEvent(opts: {
       return;
     }
 
-    const pixelId = landing.meta_pixel_id as string | null;
-    const accessToken = landing.meta_access_token as string | null;
+    const pixelId = (landing as any).meta_pixel_id as string | null;
+    const accessToken = (landing as any).meta_access_token as string | null;
 
     if (!pixelId || !accessToken) {
       console.warn(
@@ -134,7 +143,7 @@ async function sendMetaEvent(opts: {
       return;
     }
 
-    // 2) Definir nombre de evento en Meta
+    // 2) Nombre de evento
     const eventName =
       eventType === "conversion"
         ? "Purchase"
@@ -147,17 +156,10 @@ async function sendMetaEvent(opts: {
     const endpoint = `https://graph.facebook.com/v19.0/${pixelId}/events`;
     const eventTime = Math.floor(Date.now() / 1000);
 
-    // 3) user_data mínimo (IP y User-Agent)
+    // 3) user_data (IP + User-Agent)
     const user_data: Record<string, any> = {};
-    if (visitorIp) {
-      user_data.client_ip_address = visitorIp;
-    }
-    if (userAgent) {
-      user_data.client_user_agent = userAgent;
-    }
-
-    // (Opcional: podríamos hashear teléfono y mandarlo como ph más adelante)
-    // if (waPhone) { ... }
+    if (visitorIp) user_data.client_ip_address = visitorIp;
+    if (userAgent) user_data.client_user_agent = userAgent;
 
     // 4) custom_data solo para Purchase
     const custom_data: Record<string, any> = {};
@@ -166,14 +168,14 @@ async function sendMetaEvent(opts: {
       custom_data.currency = "ARS";
     }
 
-    // URL pública de la landing (si querés, ajustá a tu dominio real)
+    // URL pública de la landing
     const PUBLIC_FRONTEND_BASE_URL =
-      process.env.NEXT_PUBLIC_SITE_URL || // si la tenés
-      process.env.FRONTEND_BASE_URL ||    // o la misma que usás en wa-server
-      "https://example.com";
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      process.env.FRONTEND_BASE_URL ||
+      "https://circo-tracking-crm.vercel.app";
 
-    const event_source_url = landing.slug
-      ? `${PUBLIC_FRONTEND_BASE_URL}/p/${landing.slug}`
+    const event_source_url = (landing as any).slug
+      ? `${PUBLIC_FRONTEND_BASE_URL}/p/${(landing as any).slug}`
       : undefined;
 
     const payload: any = {
@@ -207,7 +209,7 @@ async function sendMetaEvent(opts: {
     } else {
       console.log(
         `[META CAPI] ${eventName} enviado OK → landingId=`,
-        landing.id,
+        (landing as any).id,
         "phone=",
         waPhone || null,
         "amount=",
