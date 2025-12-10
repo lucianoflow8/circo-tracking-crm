@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  // Relación con líneas de WhatsApp (multi-línea)
+  whatsappLines WhatsappLine[]
+
+  // Relación con landings / páginas
+  pages         Page[]
+
+  // Relación con mensajes de CRM
+  crmMessages   CrmMessage[]
+}
+
+model WhatsappLine {
+  id           String     @id @default(cuid())
+  user         User       @relation(fields: [userId], references: [id])
+  userId       String
+
+  name         String
+  phoneNumber  String?
+  sessionData  String?
+  status       String      @default("disconnected")
+  createdAt    DateTime    @default(now())
+
+  contacts     Contact[]
+  messages     Message[]
+  conversions  Conversion[]
+  pages        Page[]
+
+  @@index([userId])
+  @@index([status, createdAt])
+}
+
+model Contact {
+  id              String       @id @default(cuid())
+  whatsappLine    WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId  String
+
+  phone           String
+  name            String?
+  avatarUrl       String?
+  firstContactAt  DateTime?
+  lastMessageAt   DateTime?
+  totalMessages   Int          @default(0)
+  createdAt       DateTime     @default(now())
+
+  messages        Message[]
+  conversions     Conversion[]
+  events          Event[]
+
+  @@unique([whatsappLineId, phone])
+  @@index([whatsappLineId])
+  @@index([lastMessageAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  contact        Contact      @relation(fields: [contactId], references: [id])
+  contactId      String
+
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId String
+
+  direction      String
+  body           String
+  mediaUrl       String?
+  isReceipt      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@index([contactId, createdAt])
+  @@index([whatsappLineId, createdAt])
+}
+
+model Conversion {
+  id             String       @id @default(cuid())
+  contact        Contact      @relation(fields: [contactId], references: [id])
+  contactId      String
+
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId String
+
+  amount         Float?
+  screenshotUrl  String?
+  createdAt      DateTime     @default(now())
+
+  @@index([whatsappLineId, createdAt])
+  @@index([contactId])
+}
+
+model Page {
+  id              String        @id @default(cuid())
+  user            User          @relation(fields: [userId], references: [id])
+  userId          String
+
+  name            String
+  slug            String        @unique
+  config          String
+  whatsappLine    WhatsappLine? @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId  String?
+
+  metaAccessToken String?
+  metaPixelId     String?
+  published       Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+
+  events          Event[]
+
+  @@index([userId])
+  @@index([whatsappLineId])
+}
+
+model Event {
+  id         String   @id @default(cuid())
+  page       Page?    @relation(fields: [pageId], references: [id])
+  pageId     String?
+
+  contact    Contact? @relation(fields: [contactId], references: [id])
+  contactId  String?
+
+  type       String
+  metadata   String?
+  createdAt  DateTime @default(now())
+
+  @@index([pageId])
+  @@index([contactId])
+  @@index([type, createdAt])
+}
+
+model PhoneProfile {
+  phone     String   @id
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CrmMessage {
+  id          String   @id @default(cuid())
+
+  ownerId     String?
+  owner       User?    @relation(fields: [ownerId], references: [id])
+
+  lineId      String?
+  phone       String
+  direction   String
+  waMessageId String   @unique
+  body        String?
+  msgType     String?
+  rawPayload  String?
+  createdAt   DateTime @default(now())
+
+  // === NUEVO: info de media guardada ===
+  mediaDataUrl  String?
+  mediaFileName String?
+  mediaMimeType String?
+
+  @@index([phone])
+  @@index([lineId])
+  @@index([ownerId])
+}
+
+model AgentPortalLink {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   // sólo guardamos el id del usuario
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  @@index([userId])
+}
