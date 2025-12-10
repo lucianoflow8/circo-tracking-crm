@@ -2,6 +2,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 // helper: arma link de WhatsApp tipo wa.me
 function buildWaLink(phone: string, text?: string | null) {
   const clean = (phone || "").replace(/\D/g, "");

@@ -1,6 +1,9 @@
 // app/api/chats/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 const WA_SERVER_URL = process.env.WA_SERVER_URL!;
 const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
 

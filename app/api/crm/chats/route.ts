@@ -4,6 +4,9 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma"; // ajustá el import si tu prisma está en otro lado
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET() {
   try {
     const ownerId = await getCurrentUserId();
@@ -43,7 +46,6 @@ export async function GET() {
     }
 
     // 2) Traer mensajes del CRM para esas líneas
-    // Tomamos los últimos N mensajes ordenados desc y armamos un chat por phone
     const messages = await prisma.crmMessage.findMany({
       where: {
         lineId: { in: lineIds },
