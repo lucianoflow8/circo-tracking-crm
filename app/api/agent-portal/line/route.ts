@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUserId } from "@/lib/auth";
-import { supabaseAdmin } from "@/lib/supabaseAdmin"; // 👈 usamos el admin, no el anon
+import { supabaseAdmin } from "@/lib/supabaseAdmin"; // ⬅️ cambio aquí
 
 function generateToken(len = 40) {
   const chars =
@@ -34,7 +34,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Verificamos que la línea sea del usuario actual
     const line = await prisma.whatsappLine.findFirst({
       where: { id: lineId, userId },
       select: { id: true, name: true },
@@ -47,7 +46,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Intentamos reutilizar un portal existente para esa línea
     const { data: existing, error: selError } = await supabaseAdmin
       .from("agent_portals")
       .select("id, token, enabled, line_ids")
@@ -63,10 +61,8 @@ export async function POST(req: NextRequest) {
     let finalToken: string;
 
     if (existing && existing.enabled !== false) {
-      // Reutilizamos token existente
       finalToken = existing.token as string;
     } else {
-      // Creamos un nuevo portal para esta línea
       const token = generateToken();
 
       const { error: insError } = await supabaseAdmin
@@ -85,7 +81,7 @@ export async function POST(req: NextRequest) {
           {
             ok: false,
             error: "No se pudo crear el link de cajero",
-            detail: insError.message ?? null,
+            detail: insError.message,
           },
           { status: 500 }
         );
@@ -97,13 +93,7 @@ export async function POST(req: NextRequest) {
     const origin = req.nextUrl.origin;
     const portalUrl = `${origin}/portal/${finalToken}`;
 
-    return NextResponse.json(
-      {
-        ok: true,
-        portalUrl,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, portalUrl }, { status: 200 });
   } catch (e: any) {
     console.error("[AGENT-PORTAL/LINE] Excepción:", e);
     return NextResponse.json(
