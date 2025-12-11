@@ -1,18 +1,22 @@
 // app/api/chats/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { getCurrentUserId } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const WA_SERVER_URL = process.env.WA_SERVER_URL;
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
+const WA_SERVER_URL = process.env.WA_SERVER_URL || "";
+const WA_DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
 
 if (!WA_SERVER_URL) {
   console.warn("[API/CHATS] Falta WA_SERVER_URL en env");
 }
+if (!WA_DEFAULT_LINE_ID) {
+  console.warn(
+    "[API/CHATS] WA_DEFAULT_LINE_ID está vacío (se usará sólo cuando no venga ?lineId=)"
+  );
+}
 
+// GET /api/chats?lineId=xxxx
 export async function GET(req: NextRequest) {
   try {
     if (!WA_SERVER_URL) {
@@ -25,36 +29,19 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const lineIdFromQuery = url.searchParams.get("lineId");
 
+    // 1) Si viene ?lineId= en la URL, usamos ese
     let effectiveLineId: string | null = lineIdFromQuery;
 
-    // 1) Si viene ?lineId= en la URL, usamos ese
-    if (!effectiveLineId) {
-      // 2) Intentamos deducir una línea CONECTADA del usuario logueado
-      const userId = await getCurrentUserId();
-
-      if (userId) {
-        const connectedLine = await prisma.whatsappLine.findFirst({
-          where: { userId, status: "connected" },
-          orderBy: { createdAt: "asc" },
-          select: { id: true },
-        });
-
-        if (connectedLine) {
-          effectiveLineId = connectedLine.id;
-        }
-      }
-
-      // 3) Fallback: WA_DEFAULT_LINE_ID si todavía no tenemos nada
-      if (!effectiveLineId && DEFAULT_LINE_ID) {
-        effectiveLineId = DEFAULT_LINE_ID;
-      }
+    // 2) Fallback: WA_DEFAULT_LINE_ID
+    if (!effectiveLineId && WA_DEFAULT_LINE_ID) {
+      effectiveLineId = WA_DEFAULT_LINE_ID;
     }
 
     if (!effectiveLineId) {
       return NextResponse.json(
         {
           error:
-            "No se encontró ninguna línea de WhatsApp conectada ni WA_DEFAULT_LINE_ID",
+            "No se indicó lineId y WA_DEFAULT_LINE_ID está vacío. Configurá la línea.",
         },
         { status: 400 }
       );
