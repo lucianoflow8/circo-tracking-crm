@@ -2,12 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUserId } from "@/lib/auth";
-import { createClient } from "@supabase/supabase-js";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+import { supabaseAdmin } from "@/lib/supabaseAdmin"; // 👈 usamos el admin, no el anon
 
 function generateToken(len = 40) {
   const chars =
@@ -53,7 +48,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Intentamos reutilizar un portal existente para esa línea
-    const { data: existing, error: selError } = await supabase
+    const { data: existing, error: selError } = await supabaseAdmin
       .from("agent_portals")
       .select("id, token, enabled, line_ids")
       .eq("owner_user_id", userId)
@@ -74,7 +69,7 @@ export async function POST(req: NextRequest) {
       // Creamos un nuevo portal para esta línea
       const token = generateToken();
 
-      const { error: insError } = await supabase
+      const { error: insError } = await supabaseAdmin
         .from("agent_portals")
         .insert({
           token,
@@ -87,7 +82,11 @@ export async function POST(req: NextRequest) {
       if (insError) {
         console.error("[AGENT-PORTAL/LINE] Error insert:", insError);
         return NextResponse.json(
-          { ok: false, error: "No se pudo crear el link de cajero" },
+          {
+            ok: false,
+            error: "No se pudo crear el link de cajero",
+            detail: insError.message ?? null,
+          },
           { status: 500 }
         );
       }

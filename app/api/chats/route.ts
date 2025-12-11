@@ -5,38 +5,72 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL!;
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
+const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
 
 // GET /api/chats
-export async function GET(_req: NextRequest) {
+export async function GET(req: NextRequest) {
   try {
-    if (!WA_SERVER_URL || !DEFAULT_LINE_ID) {
-      console.error("[API/CHATS] Faltan WA_SERVER_URL o WA_DEFAULT_LINE_ID");
+    const { searchParams } = new URL(req.url);
+    const lineId = searchParams.get("lineId") || DEFAULT_LINE_ID;
+
+    if (!WA_SERVER_URL || !lineId) {
+      console.error(
+        "[API/CHATS] Faltan variables. WA_SERVER_URL:",
+        WA_SERVER_URL,
+        "lineId:",
+        lineId
+      );
       return NextResponse.json(
-        { error: "Configuración incompleta" },
+        { error: "Configuración incompleta en el servidor" },
         { status: 500 }
       );
     }
 
-    const url = `${WA_SERVER_URL}/lines/${encodeURIComponent(
-      DEFAULT_LINE_ID
-    )}/chats`;
+    const url = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats`;
+    console.log("[API/CHATS] Llamando a WA-SERVER:", url);
 
     const res = await fetch(url, { cache: "no-store" });
+
+    const raw = await res.text(); // leemos siempre como texto para loguear
     if (!res.ok) {
-      const text = await res.text();
-      console.error("[API/CHATS] Error WA-SERVER:", res.status, text);
+      console.error(
+        "[API/CHATS] Error WA-SERVER:",
+        res.status,
+        raw || "<sin cuerpo>"
+      );
+
+      let waBody: any = null;
+      try {
+        waBody = raw ? JSON.parse(raw) : null;
+      } catch {
+        waBody = raw;
+      }
+
       return NextResponse.json(
-        { error: "Error al obtener chats desde WA-SERVER" },
+        {
+          error: "Error al obtener chats desde WA-SERVER",
+          waStatus: res.status,
+          waBody,
+        },
         { status: 500 }
       );
     }
 
-    const data = await res.json();
+    // Si vino OK, parseamos como JSON
+    let data: any = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.error("[API/CHATS] No se pudo parsear JSON de WA-SERVER:", e);
+      return NextResponse.json(
+        { error: "Respuesta inválida de WA-SERVER" },
+        { status: 500 }
+      );
+    }
+
     const waChats: any[] = data.chats || [];
 
     const chats = waChats.map((c) => {
-      // id real de WhatsApp (incluye @c.us o @g.us)
       const rawId: string =
         c.id?._serialized || c.waChatId || c.id || String(c.chatId || "");
 
@@ -45,7 +79,6 @@ export async function GET(_req: NextRequest) {
         rawId.endsWith("@g.us") ||
         (c.id && String(c.id).includes("@g.us"));
 
-      // Teléfono solo para chats individuales
       let phone: string | null = null;
       if (!isGroup) {
         const match =
@@ -55,7 +88,6 @@ export async function GET(_req: NextRequest) {
         phone = match ? match[1] : null;
       }
 
-      // Nombre amigable
       const name = (() => {
         if (isGroup) {
           return (
@@ -79,7 +111,7 @@ export async function GET(_req: NextRequest) {
       })();
 
       return {
-        id: rawId, // 👈 MUY IMPORTANTE: usamos el id real (incluye @g.us en grupos)
+        id: rawId,
         waChatId: rawId,
         name,
         isGroup,
@@ -98,10 +130,13 @@ export async function GET(_req: NextRequest) {
     });
 
     return NextResponse.json({ chats });
-  } catch (err) {
+  } catch (err: any) {
     console.error("[API/CHATS] Error interno:", err);
     return NextResponse.json(
-      { error: "Error interno al obtener chats" },
+      {
+        error: "Error interno al obtener chats",
+        detail: err?.message ?? null,
+      },
       { status: 500 }
     );
   }
