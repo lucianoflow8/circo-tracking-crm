@@ -1,76 +1,138 @@
 // app/api/chats/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL!;
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
+const WA_DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || null;
 
-// GET /api/chats
+// GET /api/chats?lineId=xxxxx   (opcional)
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const lineId = searchParams.get("lineId") || DEFAULT_LINE_ID;
-
-    if (!WA_SERVER_URL || !lineId) {
-      console.error(
-        "[API/CHATS] Faltan variables. WA_SERVER_URL:",
-        WA_SERVER_URL,
-        "lineId:",
-        lineId
-      );
+    if (!WA_SERVER_URL) {
+      console.error("[API/CHATS] FALTA WA_SERVER_URL en el .env");
       return NextResponse.json(
-        { error: "Configuración incompleta en el servidor" },
+        { error: "Servidor de WhatsApp no configurado" },
         { status: 500 }
       );
     }
 
-    const url = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats`;
-    console.log("[API/CHATS] Llamando a WA-SERVER:", url);
+    // 1) Usuario actual
+    const userId = await getCurrentUserId().catch(() => null);
 
-    const res = await fetch(url, { cache: "no-store" });
+    // 2) Tomamos ?lineId= de la query si viene
+    const urlReq = new URL(req.url);
+    const queryLineId = urlReq.searchParams.get("lineId");
 
-    const raw = await res.text(); // leemos siempre como texto para loguear
+    let effectiveLineId: string | null = null;
+
+    // ========= PRIORIDAD 1: línea explícita en la query, pero validando dueño =========
+    if (userId && queryLineId) {
+      const line = await prisma.whatsappLine.findFirst({
+        where: {
+          id: queryLineId,
+          userId,
+        },
+        select: { id: true },
+      });
+
+      if (!line) {
+        return NextResponse.json(
+          {
+            error: "Línea no encontrada o no pertenece al usuario",
+          },
+          { status: 404 }
+        );
+      }
+
+      effectiveLineId = line.id;
+    }
+
+    // ========= PRIORIDAD 2: primera línea del usuario logueado =========
+    if (userId && !effectiveLineId) {
+      const firstLine = await prisma.whatsappLine.findFirst({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      });
+
+      if (firstLine) {
+        effectiveLineId = firstLine.id;
+      }
+    }
+
+    // ========= PRIORIDAD 3: fallback al WA_DEFAULT_LINE_ID =========
+    if (!effectiveLineId) {
+      if (!WA_DEFAULT_LINE_ID) {
+        // No hay línea del usuario ni fallback
+        return NextResponse.json(
+          {
+            chats: [],
+            info:
+              "Sin líneas de WhatsApp asociadas a este usuario y sin WA_DEFAULT_LINE_ID",
+          },
+          { status: 200 }
+        );
+      }
+
+      // Pensado para vos: tu cuenta Flow principal
+      effectiveLineId = WA_DEFAULT_LINE_ID;
+    }
+
+    // ========= Llamar al WA-SERVER con la línea efectiva =========
+    const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(
+      effectiveLineId
+    )}/chats`;
+
+    const res = await fetch(waUrl, { cache: "no-store" });
+
+    let bodyText = "";
+    try {
+      bodyText = await res.text();
+    } catch {
+      bodyText = "";
+    }
+
     if (!res.ok) {
       console.error(
         "[API/CHATS] Error WA-SERVER:",
         res.status,
-        raw || "<sin cuerpo>"
+        bodyText || "(sin body)"
       );
 
-      let waBody: any = null;
+      // Intentamos parsear JSON por si viene { error: "Session not found" }
+      let parsed: any = {};
       try {
-        waBody = raw ? JSON.parse(raw) : null;
+        parsed = bodyText ? JSON.parse(bodyText) : {};
       } catch {
-        waBody = raw;
+        parsed = {};
       }
 
       return NextResponse.json(
         {
           error: "Error al obtener chats desde WA-SERVER",
           waStatus: res.status,
-          waBody,
+          waBody: parsed,
         },
         { status: 500 }
       );
     }
 
-    // Si vino OK, parseamos como JSON
+    // Si ok, parseamos como JSON
     let data: any = {};
     try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch (e) {
-      console.error("[API/CHATS] No se pudo parsear JSON de WA-SERVER:", e);
-      return NextResponse.json(
-        { error: "Respuesta inválida de WA-SERVER" },
-        { status: 500 }
-      );
+      data = bodyText ? JSON.parse(bodyText) : {};
+    } catch {
+      data = {};
     }
 
     const waChats: any[] = data.chats || [];
 
     const chats = waChats.map((c) => {
+      // id real de WhatsApp (incluye @c.us o @g.us)
       const rawId: string =
         c.id?._serialized || c.waChatId || c.id || String(c.chatId || "");
 
@@ -79,6 +141,7 @@ export async function GET(req: NextRequest) {
         rawId.endsWith("@g.us") ||
         (c.id && String(c.id).includes("@g.us"));
 
+      // Teléfono solo para chats individuales
       let phone: string | null = null;
       if (!isGroup) {
         const match =
@@ -88,6 +151,7 @@ export async function GET(req: NextRequest) {
         phone = match ? match[1] : null;
       }
 
+      // Nombre amigable
       const name = (() => {
         if (isGroup) {
           return (
@@ -111,7 +175,7 @@ export async function GET(req: NextRequest) {
       })();
 
       return {
-        id: rawId,
+        id: rawId, // 👈 usamos el id real (incluye @g.us en grupos)
         waChatId: rawId,
         name,
         isGroup,
@@ -129,14 +193,11 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json({ chats });
-  } catch (err: any) {
+    return NextResponse.json({ chats, lineId: effectiveLineId });
+  } catch (err) {
     console.error("[API/CHATS] Error interno:", err);
     return NextResponse.json(
-      {
-        error: "Error interno al obtener chats",
-        detail: err?.message ?? null,
-      },
+      { error: "Error interno al obtener chats" },
       { status: 500 }
     );
   }
