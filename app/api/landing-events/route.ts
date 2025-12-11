@@ -14,7 +14,11 @@ interface LandingEventPayload {
   waPhone?: string | null;
   amount?: number | null;
   screenshotUrl?: string | null;
+  waLineId?: string | null; // opcional: permitir mandarlo explícito
 }
+
+// fallback global (para tu cuenta)
+const WA_DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || null;
 
 // ========================
 //  Endpoint principal
@@ -31,6 +35,7 @@ export async function POST(req: NextRequest) {
       waPhone,
       amount,
       screenshotUrl,
+      waLineId,
     } = body;
 
     if (!landingId || !eventType) {
@@ -45,6 +50,78 @@ export async function POST(req: NextRequest) {
     const userAgent = req.headers.get("user-agent") || null;
 
     // ========================
+    // 0) Resolver wa_line_id multi-tenant
+    // ========================
+    let waLineIdToStore: string | null = waLineId ?? null;
+
+    try {
+      // 0.1) Si no vino waLineId explícito, inferimos por landing → owner → wa_lines
+      if (!waLineIdToStore && landingId) {
+        const { data: landing, error: landingError } = await supabaseAdmin
+          .from("landing_pages")
+          .select("id, owner_id")
+          .eq("id", landingId)
+          .maybeSingle();
+
+        if (landingError) {
+          console.error(
+            "[landing-events] Error leyendo landing_pages:",
+            landingError.message
+          );
+        } else if (landing && (landing as any).owner_id) {
+          const ownerId = (landing as any).owner_id as string;
+
+          let linesQuery = supabaseAdmin
+            .from("wa_lines")
+            .select("id, wa_phone, status, last_assigned_at")
+            .eq("owner_id", ownerId)
+            .eq("status", "connected");
+
+          // Si vino waPhone, intentamos matchear esa línea
+          if (waPhone) {
+            linesQuery = linesQuery.eq("wa_phone", waPhone);
+          }
+
+          const { data: lines, error: linesError } = await linesQuery;
+
+          if (linesError) {
+            console.error(
+              "[landing-events] Error leyendo wa_lines:",
+              linesError.message
+            );
+          } else if (lines && lines.length > 0) {
+            // Si hay varias, elegimos la de last_assigned_at más viejita
+            const sorted = [...lines].sort((a: any, b: any) => {
+              const aTime = a.last_assigned_at
+                ? new Date(a.last_assigned_at).getTime()
+                : 0;
+              const bTime = b.last_assigned_at
+                ? new Date(b.last_assigned_at).getTime()
+                : 0;
+              return aTime - bTime;
+            });
+
+            waLineIdToStore = sorted[0].id as string;
+          }
+        }
+      }
+
+      // 0.2) Fallback global - sólo para tu cuenta si nada matchea
+      if (!waLineIdToStore && WA_DEFAULT_LINE_ID) {
+        waLineIdToStore = WA_DEFAULT_LINE_ID;
+      }
+    } catch (err) {
+      console.error(
+        "[landing-events] Error resolviendo wa_line_id multi-tenant:",
+        err
+      );
+      // si explota esto, igual seguimos y guardamos el evento sin wa_line_id
+    }
+
+    const safeAmount =
+      typeof amount === "number" && !Number.isNaN(amount) ? amount : null;
+
+    // ========================
     // 1) Guardar evento en DB
     // ========================
     const { error } = await supabaseAdmin.from("landing_events").insert({
@@ -52,12 +129,11 @@ export async function POST(req: NextRequest) {
       event_type: eventType,
       button_id: buttonId ?? null,
       wa_phone: waPhone ?? null,
-      amount:
-        typeof amount === "number" && !Number.isNaN(amount) ? amount : null,
+      amount: safeAmount,
       screenshot_url: screenshotUrl ?? null,
       visitor_ip: visitorIp,
       user_agent: userAgent,
-      // wa_line_id ya NO se envía → tu tabla no lo tiene
+      wa_line_id: waLineIdToStore ?? null, // 👈 multi-tenant
     });
 
     if (error) {
@@ -77,8 +153,7 @@ export async function POST(req: NextRequest) {
       await sendMetaEvent({
         landingId,
         eventType,
-        amount:
-          typeof amount === "number" && !Number.isNaN(amount) ? amount : null,
+        amount: safeAmount,
         visitorIp,
         userAgent,
         waPhone: waPhone ?? null,
