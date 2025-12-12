@@ -80,51 +80,39 @@ const formatMessageBody = (msg: Message): string => {
   let body = msg.body ?? "";
   const trimmed = body.trim();
 
-  const anyMsg = msg as any;
-
-  // Lo que el front sabe
   const hasMediaObj = !!msg.media;
+  const hasMediaPreview =
+    !!msg.media &&
+    typeof msg.media.dataUrl === "string" &&
+    msg.media.dataUrl.trim() !== "";
 
-  // Info que pueda venir cruda del WA-SERVER
-  const type = (msg.type || anyMsg.type || "").toString().toLowerCase();
-  const mime = (
-    anyMsg.mimetype ||
-    anyMsg.mimeType ||
-    ""
-  )
-    .toString()
-    .toLowerCase();
-
-  const isImage = type === "image" || mime.startsWith("image/");
-  const isAudio =
-    type === "audio" || type === "ptt" || mime.startsWith("audio/");
-  const isDocument =
-    type === "document" ||
-    type === "pdf" ||
-    mime === "application/pdf" ||
-    mime.startsWith("application/");
-
-  // ===== Mensajes sin texto =====
+  // caso sin texto
   if (!trimmed) {
-    if (isImage) {
-      // Foto sin texto → solo se ve la imagen (o solo la burbuja si todavía no tenemos preview)
-      body = "";
-    } else if (isAudio) {
-      // Audio sin texto → solo reproductor
-      body = "";
-    } else if (isDocument) {
-      // Docs → mostramos nombre o texto genérico
-      body = msg.media?.fileName || "📄 Documento";
-    } else if (hasMediaObj || anyMsg.hasMedia) {
-      // Algún archivo raro o tipo desconocido
-      body = "Archivo adjunto";
+    if (hasMediaObj && hasMediaPreview) {
+      // Tenemos media con preview (imagen/audio/documento que el front puede mostrar).
+      // - imagen/audio: dejamos body vacío (solo se ve la imagen o el reproductor)
+      // - documento: si no hay nombre, usamos un fallback
+      if (msg.type === "document" && !msg.media?.fileName) {
+        body = "📄 Documento";
+      } else {
+        body = "";
+      }
     } else {
-      // Nada de nada → no mostramos texto
-      body = "";
+      // No tenemos preview (lo que pasa con muchos mensajes que vienen desde WA-SERVER).
+      // Mostramos un texto para que al menos se vea algo en la burbuja.
+      if (msg.type === "image") {
+        body = "📷 Imagen";
+      } else if (msg.type === "audio") {
+        body = "🎧 Audio";
+      } else if (msg.type === "document") {
+        body = msg.media?.fileName || "📄 Documento";
+      } else {
+        body = "[adjunto]";
+      }
     }
   }
 
-  // ===== Prefijo con nombre en grupos =====
+  // prefijo de nombre para grupos
   if (!msg.fromMe && msg.senderName) {
     const core = body.trim();
     if (!core) {
