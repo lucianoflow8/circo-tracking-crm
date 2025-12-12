@@ -14,13 +14,37 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 const toDigits = (value: string | null | undefined) =>
   (value || "").replace(/\D/g, "");
 
+/**
+ * Dado un chatId como viene en la URL, arma:
+ *  - phoneDigits: solo números para DB (54911...)
+ *  - jid: JID real para WhatsApp (54911...@c.us o lo que venga)
+ */
+function resolvePhoneAndJid(rawChatId: string) {
+  const trimmed = (rawChatId || "").trim();
+
+  // Para DB siempre solo dígitos (sirve igual venga “54911...” o “54911...@c.us”)
+  const phone = toDigits(trimmed);
+
+  // Para WA-SERVER:
+  // - Si YA viene con @c.us o @g.us -> lo usamos tal cual
+  // - Si NO, asumimos que es un número y le agregamos @c.us
+  let jid: string;
+  if (trimmed.includes("@")) {
+    jid = trimmed; // ej: "54911....@c.us" o "xxx-yyy@g.us"
+  } else {
+    jid = `${phone}@c.us`;
+  }
+
+  return { phone, jid };
+}
+
 // ========= GET: combina mensajes de WA-SERVER + CrmMessage =========
 export async function GET(
   _req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
 ) {
   const { chatId } = await unwrapParams(context.params);
-  const phone = toDigits(chatId);
+  const { phone, jid } = resolvePhoneAndJid(chatId);
 
   if (!phone) {
     return NextResponse.json({ messages: [] }, { status: 200 });
@@ -31,7 +55,7 @@ export async function GET(
     return NextResponse.json({ error: "No autenticado" }, { status: 401 });
   }
 
-  // ==== Resolvem​os la línea a usar ====
+  // ==== Resolvemos la línea a usar ====
   let lineId = DEFAULT_LINE_ID;
   try {
     const lastMsg = await prisma.crmMessage.findFirst({
@@ -51,8 +75,6 @@ export async function GET(
       err
     );
   }
-
-  const jid = `${phone}@c.us`;
 
   // ==== Traemos en paralelo WA-SERVER + Prisma ====
   const [waMessagesRaw, dbRows] = await Promise.all([
@@ -174,22 +196,24 @@ export async function POST(
 ) {
   try {
     const { chatId } = await unwrapParams(context.params);
-
-    const bodyJson = await req.json().catch(() => ({} as any));
-    const textBody: string = (bodyJson.body ?? "").toString();
-    const media = bodyJson.media as
+    const bodyJson = await req.json().catch(() => null);
+    const rawBody = (bodyJson?.body as string | undefined) ?? "";
+    const media = bodyJson?.media as
       | { mimetype: string; fileName?: string | null; dataUrl: string }
       | undefined;
 
-    // Permitimos vacío solo si hay media
-    if (!textBody.trim() && !media) {
+    const body = rawBody.trim();
+
+    // Permitimos body vacío si hay media
+    if (!body && !media) {
       return NextResponse.json(
         { error: "Se requiere body (texto) o media" },
         { status: 400 }
       );
     }
 
-    const phone = toDigits(chatId);
+    const { phone, jid } = resolvePhoneAndJid(chatId);
+
     if (!phone) {
       return NextResponse.json(
         { error: "chatId inválido" },
@@ -226,20 +250,20 @@ export async function POST(
       );
     }
 
-    const jid = `${phone}@c.us`;
+    // 1) Tipo de mensaje (lo usamos para WA y para la DB)
+    let msgType: string = "text";
+    if (media) {
+      const mt = media.mimetype || "";
+      if (mt.startsWith("image/")) msgType = "image";
+      else if (mt.startsWith("audio/")) msgType = "audio";
+      else if (mt === "application/pdf" || mt.startsWith("application/"))
+        msgType = "document";
+      else msgType = "media";
+    } else {
+      msgType = "text";
+    }
 
-    // Tipo local según el mimetype
-    const localType: string = (() => {
-      if (!media) return "text";
-      const mt = (media.mimetype || "").toLowerCase();
-      if (mt.startsWith("image/")) return "image";
-      if (mt.startsWith("audio/")) return "audio";
-      if (mt === "application/pdf" || mt.startsWith("application/"))
-        return "document";
-      return "media";
-    })();
-
-    // 1) Enviar al WA-SERVER
+    // 2) Enviar al WA-SERVER
     const waRes = await fetch(
       `${WA_SERVER_URL}/lines/${encodeURIComponent(
         lineId
@@ -248,9 +272,9 @@ export async function POST(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          body: textBody.trim(),
+          body,
           media,
-          type: localType, // 👈 ahora le contamos al wa-server qué tipo es
+          type: msgType, // <- IMPORTANTe para que el wa-server sepa si es image/audio/doc/text
         }),
       }
     );
@@ -258,7 +282,7 @@ export async function POST(
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
       console.error(
-        "[API/CHAT MESSAGES POST] WA-SERVER messages POST error:",
+        "WA-SERVER messages POST error:",
         waRes.status,
         text.slice(0, 300)
       );
@@ -275,19 +299,14 @@ export async function POST(
       waData = null;
     }
 
-    const waMsg = waData?.message ?? null;
-
-    // ID estable de WhatsApp
+    // 3) ID estable de WhatsApp
     const waMessageId: string =
-      (waMsg?.id && typeof waMsg.id === "object" && waMsg.id._serialized) ||
-      (typeof waMsg?.id === "string" ? waMsg.id : undefined) ||
-      waData?.messageId ||
-      waData?.key?.id ||
+      (waData &&
+        (waData.message?.id?.id ||
+          waData.message?.id ||
+          waData.messageId ||
+          waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    // Tipo final que guardamos (preferimos el de WA si viene)
-    const msgType: string =
-      (waMsg?.type as string | undefined) || localType || "text";
 
     // 4) Guardar / actualizar en CrmMessage
     const created = await prisma.crmMessage.upsert({
@@ -297,7 +316,7 @@ export async function POST(
         ownerId: userId,
         lineId,
         direction: "out",
-        body: textBody.trim(),
+        body,
         msgType,
         rawPayload: JSON.stringify(waData ?? null),
       },
@@ -306,7 +325,7 @@ export async function POST(
         ownerId: userId,
         lineId,
         direction: "out",
-        body: textBody.trim(),
+        body,
         msgType,
         waMessageId,
         rawPayload: JSON.stringify(waData ?? null),
