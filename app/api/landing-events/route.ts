@@ -10,34 +10,27 @@ interface LandingEventPayload {
   eventType: EventType;
   landingId: string;
   buttonId?: string | null;
-  waPhone?: string | null;        // <-- teléfono del LEAD (jugador)
+
+  // teléfono del LEAD (jugador) -> SOLO chat/conversion (desde WA-SERVER)
+  waPhone?: string | null;
+
   amount?: number | null;
   screenshotUrl?: string | null;
 
-  // IMPORTANTE:
-  // Para eventos que vienen del WA-SERVER (chat/conversion), mandamos el lineId externo:
-  // ej: "cmj1xvqp900052iswm7bh18bq"
+  // Para eventos del WA-SERVER (chat/conversion) mandamos external_line_id (cmj...)
+  // Para click, desde la landing también lo mandamos (para que coincida con el número rotado)
   waLineId?: string | null;
 }
 
 function safeNum(n: any) {
-  const v = typeof n === "number" && !Number.isNaN(n) ? n : null;
-  return v;
+  return typeof n === "number" && !Number.isNaN(n) ? n : null;
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LandingEventPayload;
 
-    const {
-      eventType,
-      landingId,
-      buttonId,
-      waPhone,
-      amount,
-      screenshotUrl,
-      waLineId,
-    } = body;
+    const { eventType, landingId, buttonId, waPhone, amount, screenshotUrl, waLineId } = body;
 
     if (!landingId || !eventType) {
       return NextResponse.json(
@@ -52,12 +45,16 @@ export async function POST(req: NextRequest) {
 
     // =========================================================
     // 0) Resolver wa_line_id (MULTI-TENANT, CONSISTENTE)
-    //    Guardamos SIEMPRE external_line_id (string tipo cmj...)
+    //
+    // IMPORTANTÍSIMO:
+    // - visit: NO rota (no asigna línea)
+    // - click: SÍ rota (si no vino waLineId)
+    // - chat/conversion: viene del WA-SERVER con waLineId real
     // =========================================================
     let waLineIdToStore: string | null = waLineId ?? null;
 
-    // Si NO vino waLineId (visit/click), inferimos por landing -> owner -> wa_lines connected
-    if (!waLineIdToStore) {
+    // Rotación SOLO para click y SOLO si no vino waLineId desde el front
+    if (!waLineIdToStore && eventType === "click") {
       const { data: landing, error: landingError } = await supabaseAdmin
         .from("landing_pages")
         .select("id, owner_id")
@@ -80,7 +77,6 @@ export async function POST(req: NextRequest) {
         if (linesError) {
           console.error("[landing-events] Error leyendo wa_lines:", linesError.message);
         } else if (lines && lines.length > 0) {
-          // round-robin: elegimos la que tiene last_assigned_at más viejo
           const sorted = [...lines].sort((a: any, b: any) => {
             const aTime = a.last_assigned_at ? new Date(a.last_assigned_at).getTime() : 0;
             const bTime = b.last_assigned_at ? new Date(b.last_assigned_at).getTime() : 0;
@@ -90,7 +86,7 @@ export async function POST(req: NextRequest) {
           const chosen = sorted[0] as any;
           waLineIdToStore = (chosen.external_line_id as string) || null;
 
-          // marcamos last_assigned_at para balancear
+          // marcar last_assigned_at para balancear
           try {
             await supabaseAdmin
               .from("wa_lines")
@@ -103,6 +99,10 @@ export async function POST(req: NextRequest) {
 
     const safeAmount = safeNum(amount);
 
+    // waPhone SOLO si corresponde
+    const waPhoneToStore =
+      eventType === "chat" || eventType === "conversion" ? (waPhone ?? null) : null;
+
     // ========================
     // 1) Guardar evento en DB
     // ========================
@@ -110,12 +110,12 @@ export async function POST(req: NextRequest) {
       landing_id: landingId,
       event_type: eventType,
       button_id: buttonId ?? null,
-      wa_phone: waPhone ?? null,
+      wa_phone: waPhoneToStore, // <-- LEAD (solo chat/conversion)
       amount: safeAmount,
       screenshot_url: screenshotUrl ?? null,
       visitor_ip: visitorIp,
       user_agent: userAgent,
-      wa_line_id: waLineIdToStore ?? null, // <-- SIEMPRE external_line_id (cmj...)
+      wa_line_id: waLineIdToStore ?? null, // <-- external_line_id (cmj...)
     });
 
     if (error) {
@@ -133,7 +133,7 @@ export async function POST(req: NextRequest) {
         amount: safeAmount,
         visitorIp,
         userAgent,
-        waPhone: waPhone ?? null,
+        waPhone: waPhoneToStore,
       });
     }
 
@@ -145,7 +145,7 @@ export async function POST(req: NextRequest) {
 }
 
 /* ============================================================
-   Meta Conversions API (si tu meta_access_token es real)
+   Meta Conversions API
    ============================================================ */
 async function sendMetaEvent(opts: {
   landingId: string;
@@ -168,10 +168,7 @@ async function sendMetaEvent(opts: {
       console.error("[META CAPI] Error leyendo landing_pages:", error.message);
       return;
     }
-    if (!landing) {
-      console.warn("[META CAPI] Landing no encontrada:", landingId);
-      return;
-    }
+    if (!landing) return;
 
     const pixelId = (landing as any).meta_pixel_id as string | null;
     const accessToken = (landing as any).meta_access_token as string | null;

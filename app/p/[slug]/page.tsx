@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import Script from "next/script"; // 👈 Pixel
+import Script from "next/script";
 import { supabase } from "@/lib/supabaseClient";
 
 /* ================== TYPES ================== */
@@ -11,14 +11,14 @@ import { supabase } from "@/lib/supabaseClient";
 type GameIcon = {
   id: string;
   url: string;
-  size?: number; // escala 0.5 – 1.5
+  size?: number;
 };
 
 type FloatingText = {
   id: string;
   text: string;
-  x: number; // %
-  y: number; // %
+  x: number;
+  y: number;
   color: string;
   strokeColor: string;
   strokeWidth: number;
@@ -29,8 +29,8 @@ type FloatingText = {
 type LandingButton = {
   id: string;
   label: string;
-  x: number; // %
-  y: number; // %
+  x: number;
+  y: number;
 };
 
 type LandingContent = {
@@ -41,23 +41,17 @@ type LandingContent = {
   title?: string;
   subtitle?: string;
 
-  // Posiciones (en porcentaje) del bloque principal y el logo
   titleX?: number;
   titleY?: number;
   logoX?: number;
   logoY?: number;
 
-  // Compatibilidad vieja
   buttonText?: string;
   buttonBgColor?: string;
   buttonTextColor?: string;
 
-  // Nuevo modelo de botones
   buttons?: LandingButton[];
-
   gameIcons?: GameIcon[];
-
-  // Textos flotantes
   floatingTexts?: FloatingText[];
 };
 
@@ -68,7 +62,6 @@ type LandingRow = {
   wa_phone: string | null; // backup
   content: LandingContent | null;
 
-  // 👇 nuevos campos para pixel
   meta_pixel_id?: string | null;
   meta_access_token?: string | null;
 };
@@ -89,36 +82,21 @@ const defaultContent: LandingContent = {
   logoUrl: "",
   title: "RECLAMÁ TU BONO DE 30% EXTRA",
   subtitle: "Landing simple para tus campañas de Meta",
-
-  // Centro por defecto
   titleX: 50,
   titleY: 35,
   logoX: 50,
   logoY: 22,
-
   buttonText: "Ir al WhatsApp ahora",
   buttonBgColor: "#22d3ee",
   buttonTextColor: "#000000",
-
-  buttons: [
-    {
-      id: "btn_1",
-      label: "Ir al WhatsApp ahora",
-      x: 50,
-      y: 65,
-    },
-  ],
-
+  buttons: [{ id: "btn_1", label: "Ir al WhatsApp ahora", x: 50, y: 65 }],
   gameIcons: [],
   floatingTexts: [],
 };
 
-/* Helper para código de landing basado en slug */
 function getLandingCodeFromSlug(slug: string) {
   return slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
-
-/* ================== COMPONENT ================== */
 
 export default function PublicLandingPage() {
   const params = useParams();
@@ -128,11 +106,10 @@ export default function PublicLandingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // info de WhatsApp que viene de /api/landing-wa-phone
-  const [waRouting, setWaRouting] = useState<WaRoutingInfo | null>(null);
   const [loadingWa, setLoadingWa] = useState(false);
+  const [waRouting, setWaRouting] = useState<WaRoutingInfo | null>(null);
 
-  /* ---------- LOAD LANDING (Supabase) ---------- */
+  /* ---------- LOAD LANDING ---------- */
   useEffect(() => {
     if (!slug) return;
 
@@ -143,9 +120,7 @@ export default function PublicLandingPage() {
 
         const { data, error } = await supabase
           .from("landing_pages")
-          .select(
-            "id, slug, wa_message, wa_phone, content, meta_pixel_id, meta_access_token"
-          ) // 👈 incluimos pixel y token
+          .select("id, slug, wa_message, wa_phone, content, meta_pixel_id, meta_access_token")
           .eq("slug", slug)
           .single();
 
@@ -163,21 +138,16 @@ export default function PublicLandingPage() {
   }, [slug]);
 
   /* ---------- MENSAJE DE WHATSAPP ---------- */
-
   const baseMessage = row?.wa_message || "Quiero aprovechar la promo 👋";
-
-  const landingCode = row?.slug
-    ? getLandingCodeFromSlug(row.slug)
-    : "";
-
+  const landingCode = row?.slug ? getLandingCodeFromSlug(row.slug) : "";
   const waMessage = landingCode
     ? `${baseMessage}. Mi código de descuento es: ${landingCode}`
     : baseMessage;
 
-  /* ---------- PEDIR NÚMERO ROTADO AL BACK ---------- */
+  /* ---------- PEDIR NÚMERO ROTADO (SE USA EN EL CLICK) ---------- */
+  const fetchWaRouting = useCallback(async (): Promise<WaRoutingInfo | null> => {
+    if (!row?.id && !row?.slug) return null;
 
-  const fetchWaRouting = useCallback(async () => {
-    if (!row?.id && !row?.slug) return;
     try {
       setLoadingWa(true);
 
@@ -186,75 +156,45 @@ export default function PublicLandingPage() {
       else if (row?.slug) params.set("slug", row.slug);
       if (waMessage) params.set("text", waMessage);
 
-      const res = await fetch(`/api/landing-wa-phone?${params.toString()}`, {
-        method: "GET",
-      });
+      const res = await fetch(`/api/landing-wa-phone?${params.toString()}`, { method: "GET" });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         console.error("[Landing] Error landing-wa-phone:", data);
-        setWaRouting({
-          ok: false,
-        });
-        return;
+        const bad = { ok: false } as WaRoutingInfo;
+        setWaRouting(bad);
+        return bad;
       }
 
       const data: WaRoutingInfo = await res.json();
       setWaRouting(data);
+      return data;
     } catch (e) {
       console.error("[Landing] Excepción landing-wa-phone:", e);
-      setWaRouting({ ok: false });
+      const bad = { ok: false } as WaRoutingInfo;
+      setWaRouting(bad);
+      return bad;
     } finally {
       setLoadingWa(false);
     }
   }, [row?.id, row?.slug, waMessage]);
 
-  // pedir la info de WA cuando tengo la landing
-  useEffect(() => {
-    if (!row) return;
-    fetchWaRouting();
-  }, [row, fetchWaRouting]);
+  /* ---------- CONFIG VISUAL ---------- */
+  const content: LandingContent = { ...defaultContent, ...(row?.content || {}) };
 
-  /* ---------- CONFIG BÁSICA (usa row pero sin hooks nuevos) ---------- */
-
-  const content: LandingContent = {
-    ...defaultContent,
-    ...(row?.content || {}),
-  };
-
-  // Compatibilidad: si no hay "buttons" pero sí buttonText viejo, creo uno
   if (!content.buttons || content.buttons.length === 0) {
-    content.buttons = [
-      {
-        id: "btn_1",
-        label: content.buttonText || defaultContent.buttonText!,
-        x: 50,
-        y: 65,
-      },
-    ];
+    content.buttons = [{ id: "btn_1", label: content.buttonText || defaultContent.buttonText!, x: 50, y: 65 }];
   }
 
   const gameIcons: GameIcon[] = content.gameIcons || [];
   const floatingTexts: FloatingText[] = content.floatingTexts || [];
   const buttons: LandingButton[] = content.buttons || [];
-
-  // Teléfono que realmente se va a usar
-  const waPhoneFinal =
-    waRouting?.ok && waRouting.waPhone
-      ? waRouting.waPhone
-      : row?.wa_phone || "";
-
-  const waUrl = waPhoneFinal
-    ? `https://wa.me/${waPhoneFinal}?text=${encodeURIComponent(waMessage)}`
-    : `https://wa.me/?text=${encodeURIComponent(waMessage)}`;
-
   const buttonTextColor = content.buttonTextColor || "#000000";
 
-  /* ============ TRACKING (visita + clicks) ============ */
-
+  /* ============ TRACKING (visit + click) ============ */
   const trackEvent = async (
     eventType: "visit" | "click" | "chat",
-    extra?: { buttonId?: string }
+    extra?: { buttonId?: string; waLineId?: string | null }
   ) => {
     try {
       await fetch("/api/landing-events", {
@@ -264,7 +204,12 @@ export default function PublicLandingPage() {
           eventType,
           landingId: row?.id ?? null,
           buttonId: extra?.buttonId ?? null,
-          waPhone: waPhoneFinal || null,
+
+          // IMPORTANTE: waPhone es del LEAD, acá NO lo tenemos -> null
+          waPhone: null,
+
+          // Para que el click quede ligado al número asignado/rotado:
+          waLineId: extra?.waLineId ?? null,
         }),
       });
     } catch (e) {
@@ -272,7 +217,6 @@ export default function PublicLandingPage() {
     }
   };
 
-  // Track visita al cargar la landing
   useEffect(() => {
     if (!row?.id) return;
     trackEvent("visit");
@@ -304,7 +248,6 @@ export default function PublicLandingPage() {
     <>
       <main className="min-h-screen bg-[#050816] text-white">
         <div className="relative min-h-screen overflow-hidden">
-          {/* Fondo */}
           {content.bgImageUrl ? (
             <div
               className="absolute inset-0 bg-cover bg-center"
@@ -319,9 +262,7 @@ export default function PublicLandingPage() {
           )}
           <div className="absolute inset-0 bg-black/60" />
 
-          {/* Canvas de elementos */}
           <div className="relative z-10 min-h-screen w-full">
-            {/* LOGO */}
             {content.logoUrl && (
               <div
                 className="absolute flex justify-center items-center"
@@ -331,15 +272,10 @@ export default function PublicLandingPage() {
                   transform: "translate(-50%, -50%)",
                 }}
               >
-                <img
-                  src={content.logoUrl}
-                  alt="logo"
-                  className="h-16 object-contain"
-                />
+                <img src={content.logoUrl} alt="logo" className="h-16 object-contain" />
               </div>
             )}
 
-            {/* BLOQUE TÍTULO + SUBTÍTULO */}
             {(content.title || content.subtitle) && (
               <div
                 className="absolute text-center px-4"
@@ -355,22 +291,15 @@ export default function PublicLandingPage() {
                   </h1>
                 )}
                 {content.subtitle && (
-                  <p className="text-sm md:text-base text-white/80">
-                    {content.subtitle}
-                  </p>
+                  <p className="text-sm md:text-base text-white/80">{content.subtitle}</p>
                 )}
               </div>
             )}
 
-            {/* ICONOS DE JUEGOS */}
             {gameIcons.length > 0 && (
               <div
                 className="absolute flex flex-wrap justify-center gap-3 max-w-3xl mx-auto"
-                style={{
-                  left: "50%",
-                  top: "52%",
-                  transform: "translate(-50%, -50%)",
-                }}
+                style={{ left: "50%", top: "52%", transform: "translate(-50%, -50%)" }}
               >
                 {gameIcons.map((icon) => (
                   <div
@@ -393,7 +322,6 @@ export default function PublicLandingPage() {
               </div>
             )}
 
-            {/* BOTONES DE WHATSAPP */}
             {buttons.map((btn) => (
               <button
                 key={btn.id}
@@ -409,18 +337,31 @@ export default function PublicLandingPage() {
                     "linear-gradient(to right bottom, rgb(45,212,191), rgb(74,222,128))",
                   borderColor: "rgb(110,231,183)",
                 }}
-                onClick={() => {
-                  trackEvent("click", { buttonId: btn.id });
-                  window.location.href = waUrl;
+                onClick={async () => {
+                  // 1) Rotar línea JUSTO en el click
+                  const routing = await fetchWaRouting();
+
+                  // 2) Track del click con la línea asignada (external_line_id)
+                  await trackEvent("click", {
+                    buttonId: btn.id,
+                    waLineId: routing?.ok ? (routing.lineId ?? null) : null,
+                  });
+
+                  // 3) Redirigir
+                  const fallbackPhone = row?.wa_phone || "";
+                  const fallbackUrl = fallbackPhone
+                    ? `https://wa.me/${fallbackPhone}?text=${encodeURIComponent(waMessage)}`
+                    : `https://wa.me/?text=${encodeURIComponent(waMessage)}`;
+
+                  const finalUrl =
+                    routing?.ok && routing.waLink ? routing.waLink : fallbackUrl;
+
+                  window.location.href = finalUrl;
                 }}
                 disabled={loadingWa}
               >
                 <span className="inline-flex items-center justify-center">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 32 32"
-                    className="w-5 h-5"
-                  >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" className="w-5 h-5">
                     <circle cx="16" cy="16" r="16" fill="#25d366" />
                     <path
                       fill="#fff"
@@ -432,7 +373,6 @@ export default function PublicLandingPage() {
               </button>
             ))}
 
-            {/* TEXTOS FLOTANTES */}
             {floatingTexts.map((t) => (
               <div
                 key={t.id}
@@ -444,10 +384,7 @@ export default function PublicLandingPage() {
                   color: t.color,
                   fontSize: t.fontSize,
                   fontWeight: t.fontWeight,
-                  WebkitTextStroke:
-                    t.strokeWidth > 0
-                      ? `${t.strokeWidth}px ${t.strokeColor}`
-                      : "none",
+                  WebkitTextStroke: t.strokeWidth > 0 ? `${t.strokeWidth}px ${t.strokeColor}` : "none",
                 }}
               >
                 {t.text}
