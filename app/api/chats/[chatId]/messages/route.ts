@@ -174,14 +174,15 @@ export async function POST(
 ) {
   try {
     const { chatId } = await unwrapParams(context.params);
-    const bodyJson = await req.json().catch(() => null);
-    const body = (bodyJson?.body as string | undefined) ?? "";
-    const media = bodyJson?.media as
+
+    const bodyJson = await req.json().catch(() => ({} as any));
+    const textBody: string = (bodyJson.body ?? "").toString();
+    const media = bodyJson.media as
       | { mimetype: string; fileName?: string | null; dataUrl: string }
       | undefined;
 
-    // Permitimos body vacío si hay media
-    if (!body.trim() && !media) {
+    // Permitimos vacío solo si hay media
+    if (!textBody.trim() && !media) {
       return NextResponse.json(
         { error: "Se requiere body (texto) o media" },
         { status: 400 }
@@ -227,6 +228,17 @@ export async function POST(
 
     const jid = `${phone}@c.us`;
 
+    // Tipo local según el mimetype
+    const localType: string = (() => {
+      if (!media) return "text";
+      const mt = (media.mimetype || "").toLowerCase();
+      if (mt.startsWith("image/")) return "image";
+      if (mt.startsWith("audio/")) return "audio";
+      if (mt === "application/pdf" || mt.startsWith("application/"))
+        return "document";
+      return "media";
+    })();
+
     // 1) Enviar al WA-SERVER
     const waRes = await fetch(
       `${WA_SERVER_URL}/lines/${encodeURIComponent(
@@ -235,14 +247,18 @@ export async function POST(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: body.trim(), media }),
+        body: JSON.stringify({
+          body: textBody.trim(),
+          media,
+          type: localType, // 👈 ahora le contamos al wa-server qué tipo es
+        }),
       }
     );
 
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
       console.error(
-        "WA-SERVER messages POST error:",
+        "[API/CHAT MESSAGES POST] WA-SERVER messages POST error:",
         waRes.status,
         text.slice(0, 300)
       );
@@ -259,25 +275,19 @@ export async function POST(
       waData = null;
     }
 
-    // 2) Tipo de mensaje
-    let msgType: string = "text";
-    if (media) {
-      const mt = media.mimetype || "";
-      if (mt.startsWith("image/")) msgType = "image";
-      else if (mt.startsWith("audio/")) msgType = "audio";
-      else if (mt === "application/pdf" || mt.startsWith("application/"))
-        msgType = "document";
-      else msgType = "media";
-    }
+    const waMsg = waData?.message ?? null;
 
-    // 3) ID estable de WhatsApp
+    // ID estable de WhatsApp
     const waMessageId: string =
-      (waData &&
-        (waData.message?.id?.id ||
-          waData.message?.id ||
-          waData.messageId ||
-          waData.key?.id)) ||
+      (waMsg?.id && typeof waMsg.id === "object" && waMsg.id._serialized) ||
+      (typeof waMsg?.id === "string" ? waMsg.id : undefined) ||
+      waData?.messageId ||
+      waData?.key?.id ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Tipo final que guardamos (preferimos el de WA si viene)
+    const msgType: string =
+      (waMsg?.type as string | undefined) || localType || "text";
 
     // 4) Guardar / actualizar en CrmMessage
     const created = await prisma.crmMessage.upsert({
@@ -287,7 +297,7 @@ export async function POST(
         ownerId: userId,
         lineId,
         direction: "out",
-        body: body.trim(),
+        body: textBody.trim(),
         msgType,
         rawPayload: JSON.stringify(waData ?? null),
       },
@@ -296,7 +306,7 @@ export async function POST(
         ownerId: userId,
         lineId,
         direction: "out",
-        body: body.trim(),
+        body: textBody.trim(),
         msgType,
         waMessageId,
         rawPayload: JSON.stringify(waData ?? null),
