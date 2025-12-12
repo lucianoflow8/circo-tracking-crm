@@ -79,46 +79,65 @@ const getAvatarFromChat = (
 const formatMessageBody = (msg: Message): string => {
   let body = msg.body ?? "";
   const trimmed = body.trim();
-  const hasMedia = !!msg.media;
 
-  // 🧩 Caso: SIN texto
+  const anyMsg = msg as any;
+
+  // Lo que el front sabe
+  const hasMediaObj = !!msg.media;
+
+  // Info que pueda venir cruda del WA-SERVER
+  const type = (msg.type || anyMsg.type || "").toString().toLowerCase();
+  const mime = (
+    anyMsg.mimetype ||
+    anyMsg.mimeType ||
+    ""
+  )
+    .toString()
+    .toLowerCase();
+
+  const isImage = type === "image" || mime.startsWith("image/");
+  const isAudio =
+    type === "audio" || type === "ptt" || mime.startsWith("audio/");
+  const isDocument =
+    type === "document" ||
+    type === "pdf" ||
+    mime === "application/pdf" ||
+    mime.startsWith("application/");
+
+  // ===== Mensajes sin texto =====
   if (!trimmed) {
-    // Si hay media (imagen/audio/doc) enviada desde el CRM,
-    // dejamos que se vea SOLO el componente visual (imagen, tarjeta, audio).
-    if (hasMedia) {
-      return "";
-    }
-
-    // Si NO hay media en el objeto pero sí viene el type,
-    // es algo recibido desde WhatsApp sin archivo cargado en el CRM.
-    switch (msg.type) {
-      case "image":
-        return "📷 Imagen";
-      case "audio":
-        return "🎧 Audio";
-      case "document":
-        return "📄 Documento";
-      case "media":
-      case "unknown":
-      default:
-        return "[adjunto]";
+    if (isImage) {
+      // Foto sin texto → solo se ve la imagen (o solo la burbuja si todavía no tenemos preview)
+      body = "";
+    } else if (isAudio) {
+      // Audio sin texto → solo reproductor
+      body = "";
+    } else if (isDocument) {
+      // Docs → mostramos nombre o texto genérico
+      body = msg.media?.fileName || "📄 Documento";
+    } else if (hasMediaObj || anyMsg.hasMedia) {
+      // Algún archivo raro o tipo desconocido
+      body = "Archivo adjunto";
+    } else {
+      // Nada de nada → no mostramos texto
+      body = "";
     }
   }
 
-  // 🧩 Caso: HAY texto
-  let finalBody = trimmed;
-
-  // Prefijo con nombre en grupos / mensajes entrantes
+  // ===== Prefijo con nombre en grupos =====
   if (!msg.fromMe && msg.senderName) {
-    if (
-      !finalBody.startsWith(msg.senderName + "\n") &&
-      !finalBody.startsWith(msg.senderName + " ")
+    const core = body.trim();
+    if (!core) {
+      body = msg.senderName;
+    } else if (
+      !core.startsWith(msg.senderName + "\n") &&
+      !core.startsWith(msg.senderName + " ")
     ) {
-      finalBody = `${msg.senderName}\n${finalBody}`;
+      body = `${msg.senderName}\n${core}`;
     }
   }
 
-  return finalBody;
+  return body;
 };
 
 const formatPhone = (raw: string | null): string | null => {

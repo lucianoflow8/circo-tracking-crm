@@ -2029,18 +2029,130 @@ app.get("/lines/:lineId/chats", async (req, res) => {
 });
 
 /* ============================================================
+   OBTENER MENSAJES DE UN CHAT
+   ============================================================ */
+
+app.get("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
+  const { lineId, chatId } = req.params;
+
+  console.log(
+    "[WA-SERVER] GET /lines/:lineId/chats/:chatId/messages",
+    lineId,
+    chatId
+  );
+
+  if (!lineId || !chatId) {
+    return res
+      .status(400)
+      .json({ error: "lineId y chatId son requeridos para obtener mensajes" });
+  }
+
+  const session = sessions[lineId];
+  if (!session || !session.client) {
+    return res.status(404).json({
+      error:
+        "Session not found. Conectá la línea primero con /lines/:lineId/connect",
+    });
+  }
+
+  const client = session.client;
+
+  try {
+    // 🔧 Normalizar chatId → JID real (@c.us / @g.us)
+    let targetId = chatId;
+    if (!targetId.endsWith("@c.us") && !targetId.endsWith("@g.us")) {
+      if (chatId.includes("@")) {
+        targetId = chatId;
+      } else {
+        targetId = `${chatId}@c.us`;
+      }
+    }
+
+    let chat = await client.getChatById(targetId).catch(() => null);
+
+    if (!chat && !targetId.endsWith("@g.us")) {
+      const groupCandidate = targetId.replace(/@c\.us$/, "@g.us");
+      chat = await client.getChatById(groupCandidate).catch(() => null);
+      if (chat) targetId = groupCandidate;
+    }
+
+    if (!chat) {
+      console.log("[WA-SERVER] Chat no encontrado al listar mensajes", targetId);
+      return res.status(404).json({ error: "Chat no encontrado" });
+    }
+
+    if (!session.cachedMessages) session.cachedMessages = {};
+
+    let msgs = session.cachedMessages[targetId];
+
+    // Si no hay cache, le pegamos a WhatsApp
+    if (!Array.isArray(msgs) || !msgs.length) {
+      let waMessages = [];
+
+      if (typeof chat.fetchMessages === "function") {
+        // versiones nuevas
+        waMessages =
+          (await chat.fetchMessages({ limit: 100 }).catch(() => [])) || [];
+      } else if (typeof chat.getMessages === "function") {
+        // versiones viejas
+        waMessages = (await chat.getMessages().catch(() => [])) || [];
+      }
+
+      const mapped = waMessages.map((m) => {
+        const tsMs = m.timestamp ? m.timestamp * 1000 : Date.now();
+        const jid = m.fromMe ? m.to : m.from;
+        const rawPhone = (jid || "").split("@")[0];
+        const phoneDigits = (rawPhone || "").replace(/\D/g, "");
+
+        let finalType = "text";
+        if (m.hasMedia || m.type === "image") finalType = "image";
+        else if (m.type === "ptt" || m.type === "audio") finalType = "audio";
+        else if (m.type === "document") finalType = "document";
+        else if (m.type && m.type !== "chat") finalType = m.type;
+
+        return {
+          id: m.id?._serialized || String(m.id),
+          fromMe: !!m.fromMe,
+          body: m.body || "",
+          timestamp: new Date(tsMs).toISOString(),
+          status: ACK_STATUS_MAP[m.ack] || (m.fromMe ? "sent" : "read"),
+          senderName: null,
+          senderNumber: phoneDigits || null,
+          senderAvatar: null,
+          type: finalType,
+          media: null,
+        };
+      });
+
+      session.cachedMessages[targetId] = mapped;
+      msgs = mapped;
+    }
+
+    return res.json({ ok: true, messages: msgs });
+  } catch (err) {
+    console.error("[WA-SERVER] Error al obtener mensajes del chat", err);
+    return res
+      .status(500)
+      .json({ error: "Error al obtener mensajes del chat" });
+  }
+});
+
+/* ============================================================
    ENVIAR MENSAJE A UN CHAT
    ============================================================ */
 
 app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
   const { lineId, chatId } = req.params;
-  const { body, type, media } = req.body || {};
+
+  // 👇 Aceptamos varias variantes: body, message, text
+  const { body, message, text, type, media } = req.body || {};
+  const content = body ?? message ?? text ?? "";
 
   console.log(
     "[WA-SERVER] POST /lines/:lineId/chats/:chatId/messages",
     lineId,
     chatId,
-    { type }
+    { type, hasMedia: !!media, contentPreview: String(content).slice(0, 50) }
   );
 
   if (!lineId || !chatId) {
@@ -2049,10 +2161,10 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
       .json({ error: "lineId y chatId son requeridos para enviar mensaje" });
   }
 
-  if (!body && !media) {
+  if (!content && !media) {
     return res
       .status(400)
-      .json({ error: "Falta body o media para enviar el mensaje" });
+      .json({ error: "Falta body/message/text o media para enviar el mensaje" });
   }
 
   const session = sessions[lineId];
@@ -2090,12 +2202,11 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
       return res.status(404).json({ error: "Chat no encontrado" });
     }
 
-    // ==========================================
-    //  ARMAR MENSAJE SEGÚN type / media
-    // ==========================================
     let sentMessage;
 
-    // Si viene media desde el front
+    // ==========================================
+    //  MENSAJE CON MEDIA
+    // ==========================================
     if (media && media.dataUrl) {
       try {
         const match = media.dataUrl.match(/^data:(.+?);base64,(.+)$/);
@@ -2119,26 +2230,19 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
 
         const messageMedia = new MessageMedia(mimetype, base64, fileName);
 
-        // Imagen con o sin caption
         if (type === "image") {
           sentMessage = await client.sendMessage(targetId, messageMedia, {
-            caption: body || "",
+            caption: content || "",
           });
-        }
-        // Documento / PDF
-        else if (type === "document") {
+        } else if (type === "document") {
           sentMessage = await client.sendMessage(targetId, messageMedia, {
-            caption: body || "",
+            caption: content || "",
           });
-        }
-        // Audio / PTT
-        else if (type === "audio") {
+        } else if (type === "audio") {
           sentMessage = await client.sendMessage(targetId, messageMedia, {});
-        }
-        // Genérico media
-        else {
+        } else {
           sentMessage = await client.sendMessage(targetId, messageMedia, {
-            caption: body || "",
+            caption: content || "",
           });
         }
       } catch (e) {
@@ -2148,8 +2252,10 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
           .json({ error: "No se pudo enviar el media por WhatsApp" });
       }
     } else {
-      // Mensaje SOLO texto
-      sentMessage = await client.sendMessage(targetId, body || "");
+      // ==========================================
+      //  MENSAJE SOLO TEXTO
+      // ==========================================
+      sentMessage = await client.sendMessage(targetId, content || "");
     }
 
     if (!sentMessage) {
@@ -2175,11 +2281,7 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
       : Date.now();
 
     let finalType = "text";
-    let mediaPayload = null;
-
     if (sentMessage.hasMedia) {
-      // Ojo: cuando recién se envía, a veces todavía no baja el blob,
-      // pero el front ya sabe qué mandó, así que podemos usar "type" del body
       finalType =
         type ||
         (sentMessage.type === "image"
@@ -2196,14 +2298,14 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
     const mapped = {
       id: sentMessage.id?._serialized || String(sentMessage.id),
       fromMe: true,
-      body: sentMessage.body || body || "",
+      body: sentMessage.body || content || "",
       timestamp: new Date(tsMs).toISOString(),
       status: ACK_STATUS_MAP[sentMessage.ack] || "sent",
       senderName: null,
       senderNumber: null,
       senderAvatar: null,
       type: finalType,
-      media: mediaPayload,
+      media: null,
     };
 
     // ==========================================
@@ -2244,15 +2346,12 @@ app.post("/lines/:lineId/chats/:chatId/messages", async (req, res) => {
             lastTimestampMs: tsMs,
             lastMessageFromMe: true,
             lastMessageStatus: mapped.status,
-            // como lo acabás de mandar vos, unreadCount = 0
             unreadCount: 0,
           };
         }
         return c;
       });
 
-      // Si por alguna razón el chat no estaba en cache, podrías
-      // agregarlo acá en el futuro.
       if (!found) {
         console.log(
           "[WA-SERVER] Aviso: el chat no estaba en cachedChats al enviar mensaje"
