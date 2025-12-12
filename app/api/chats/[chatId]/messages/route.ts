@@ -166,3 +166,163 @@ export async function GET(
 
   return NextResponse.json({ messages: merged }, { status: 200 });
 }
+
+// ========= POST: enviar mensaje Y guardarlo en CrmMessage =========
+export async function POST(
+  req: NextRequest,
+  context: { params: { chatId: string } | Promise<{ chatId: string }> }
+) {
+  try {
+    const { chatId } = await unwrapParams(context.params);
+    const bodyJson = await req.json().catch(() => null);
+    const body = (bodyJson?.body as string | undefined) ?? "";
+    const media = bodyJson?.media as
+      | { mimetype: string; fileName?: string | null; dataUrl: string }
+      | undefined;
+
+    // Permitimos body vacío si hay media
+    if (!body.trim() && !media) {
+      return NextResponse.json(
+        { error: "Se requiere body (texto) o media" },
+        { status: 400 }
+      );
+    }
+
+    const phone = toDigits(chatId);
+    if (!phone) {
+      return NextResponse.json(
+        { error: "chatId inválido" },
+        { status: 400 }
+      );
+    }
+
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return NextResponse.json(
+        { error: "No autenticado" },
+        { status: 401 }
+      );
+    }
+
+    // Línea a usar: última usada con ese teléfono o la default
+    let lineId = DEFAULT_LINE_ID;
+    try {
+      const lastMsg = await prisma.crmMessage.findFirst({
+        where: {
+          phone,
+          ownerId: userId,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      if (lastMsg?.lineId) {
+        lineId = lastMsg.lineId;
+      }
+    } catch (err) {
+      console.error(
+        "[API/CHAT MESSAGES POST] Error buscando línea para phone",
+        phone,
+        err
+      );
+    }
+
+    const jid = `${phone}@c.us`;
+
+    // 1) Enviar al WA-SERVER
+    const waRes = await fetch(
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(
+        lineId
+      )}/chats/${encodeURIComponent(jid)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: body.trim(), media }),
+      }
+    );
+
+    if (!waRes.ok) {
+      const text = await waRes.text().catch(() => "");
+      console.error(
+        "WA-SERVER messages POST error:",
+        waRes.status,
+        text.slice(0, 300)
+      );
+      return NextResponse.json(
+        { error: "Error al enviar mensaje a WA-SERVER" },
+        { status: 500 }
+      );
+    }
+
+    let waData: any = null;
+    try {
+      waData = await waRes.json();
+    } catch {
+      waData = null;
+    }
+
+    // 2) Tipo de mensaje
+    let msgType: string = "text";
+    if (media) {
+      const mt = media.mimetype || "";
+      if (mt.startsWith("image/")) msgType = "image";
+      else if (mt.startsWith("audio/")) msgType = "audio";
+      else if (mt === "application/pdf" || mt.startsWith("application/"))
+        msgType = "document";
+      else msgType = "media";
+    }
+
+    // 3) ID estable de WhatsApp
+    const waMessageId: string =
+      (waData &&
+        (waData.message?.id?.id ||
+          waData.message?.id ||
+          waData.messageId ||
+          waData.key?.id)) ||
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // 4) Guardar / actualizar en CrmMessage
+    const created = await prisma.crmMessage.upsert({
+      where: { waMessageId },
+      update: {
+        phone,
+        ownerId: userId,
+        lineId,
+        direction: "out",
+        body: body.trim(),
+        msgType,
+        rawPayload: JSON.stringify(waData ?? null),
+      },
+      create: {
+        phone,
+        ownerId: userId,
+        lineId,
+        direction: "out",
+        body: body.trim(),
+        msgType,
+        waMessageId,
+        rawPayload: JSON.stringify(waData ?? null),
+      },
+    });
+
+    // 5) Respuesta normalizada para el front
+    const saved = {
+      id: created.waMessageId || created.id,
+      fromMe: true,
+      body: created.body || "",
+      timestamp: created.createdAt.toISOString(),
+      status: "sent" as const,
+      type: (created.msgType as any) || "text",
+      media: media ?? null,
+      senderName: undefined,
+      senderNumber: created.phone,
+      senderAvatar: null,
+    };
+
+    return NextResponse.json({ message: saved }, { status: 200 });
+  } catch (err: any) {
+    console.error("Error /api/chats/[chatId]/messages POST", err);
+    return NextResponse.json(
+      { error: err?.message || "Error interno al enviar mensaje" },
+      { status: 500 }
+    );
+  }
+}
