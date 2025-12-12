@@ -128,6 +128,7 @@ const formatMessageBody = (msg: Message): string => {
   return body;
 };
 
+
 const formatPhone = (raw: string | null): string | null => {
   if (!raw) return null;
   if (raw.startsWith("+")) return raw;
