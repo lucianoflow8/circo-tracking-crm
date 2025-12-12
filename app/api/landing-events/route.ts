@@ -4,25 +4,26 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const dynamic = "force-dynamic";
 
-// 👉 tipos que usamos en el body
 type EventType = "visit" | "click" | "chat" | "conversion";
 
 interface LandingEventPayload {
   eventType: EventType;
   landingId: string;
   buttonId?: string | null;
-  waPhone?: string | null;
+  waPhone?: string | null;        // <-- teléfono del LEAD (jugador)
   amount?: number | null;
   screenshotUrl?: string | null;
-  waLineId?: string | null; // opcional: permitir mandarlo explícito
+
+  // IMPORTANTE:
+  // Para eventos que vienen del WA-SERVER (chat/conversion), mandamos el lineId externo:
+  // ej: "cmj1xvqp900052iswm7bh18bq"
+  waLineId?: string | null;
 }
 
-// fallback global (para tu cuenta)
-const WA_DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || null;
-
-// ========================
-//  Endpoint principal
-// ========================
+function safeNum(n: any) {
+  const v = typeof n === "number" && !Number.isNaN(n) ? n : null;
+  return v;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -49,77 +50,58 @@ export async function POST(req: NextRequest) {
     const visitorIp = ipHeader.split(",")[0]?.trim() || null;
     const userAgent = req.headers.get("user-agent") || null;
 
-    // ========================
-    // 0) Resolver wa_line_id multi-tenant
-    // ========================
+    // =========================================================
+    // 0) Resolver wa_line_id (MULTI-TENANT, CONSISTENTE)
+    //    Guardamos SIEMPRE external_line_id (string tipo cmj...)
+    // =========================================================
     let waLineIdToStore: string | null = waLineId ?? null;
 
-    try {
-      // 0.1) Si no vino waLineId explícito, inferimos por landing → owner → wa_lines
-      if (!waLineIdToStore && landingId) {
-        const { data: landing, error: landingError } = await supabaseAdmin
-          .from("landing_pages")
-          .select("id, owner_id")
-          .eq("id", landingId)
-          .maybeSingle();
+    // Si NO vino waLineId (visit/click), inferimos por landing -> owner -> wa_lines connected
+    if (!waLineIdToStore) {
+      const { data: landing, error: landingError } = await supabaseAdmin
+        .from("landing_pages")
+        .select("id, owner_id")
+        .eq("id", landingId)
+        .maybeSingle();
 
-        if (landingError) {
-          console.error(
-            "[landing-events] Error leyendo landing_pages:",
-            landingError.message
-          );
-        } else if (landing && (landing as any).owner_id) {
-          const ownerId = (landing as any).owner_id as string;
+      if (landingError) {
+        console.error("[landing-events] Error leyendo landing_pages:", landingError.message);
+      }
 
-          let linesQuery = supabaseAdmin
-            .from("wa_lines")
-            .select("id, wa_phone, status, last_assigned_at")
-            .eq("owner_id", ownerId)
-            .eq("status", "connected");
+      const ownerId = (landing as any)?.owner_id as string | undefined;
 
-          // Si vino waPhone, intentamos matchear esa línea
-          if (waPhone) {
-            linesQuery = linesQuery.eq("wa_phone", waPhone);
-          }
+      if (ownerId) {
+        const { data: lines, error: linesError } = await supabaseAdmin
+          .from("wa_lines")
+          .select("id, external_line_id, status, last_assigned_at")
+          .eq("owner_id", ownerId)
+          .eq("status", "connected");
 
-          const { data: lines, error: linesError } = await linesQuery;
+        if (linesError) {
+          console.error("[landing-events] Error leyendo wa_lines:", linesError.message);
+        } else if (lines && lines.length > 0) {
+          // round-robin: elegimos la que tiene last_assigned_at más viejo
+          const sorted = [...lines].sort((a: any, b: any) => {
+            const aTime = a.last_assigned_at ? new Date(a.last_assigned_at).getTime() : 0;
+            const bTime = b.last_assigned_at ? new Date(b.last_assigned_at).getTime() : 0;
+            return aTime - bTime;
+          });
 
-          if (linesError) {
-            console.error(
-              "[landing-events] Error leyendo wa_lines:",
-              linesError.message
-            );
-          } else if (lines && lines.length > 0) {
-            // Si hay varias, elegimos la de last_assigned_at más viejita
-            const sorted = [...lines].sort((a: any, b: any) => {
-              const aTime = a.last_assigned_at
-                ? new Date(a.last_assigned_at).getTime()
-                : 0;
-              const bTime = b.last_assigned_at
-                ? new Date(b.last_assigned_at).getTime()
-                : 0;
-              return aTime - bTime;
-            });
+          const chosen = sorted[0] as any;
+          waLineIdToStore = (chosen.external_line_id as string) || null;
 
-            waLineIdToStore = sorted[0].id as string;
-          }
+          // marcamos last_assigned_at para balancear
+          try {
+            await supabaseAdmin
+              .from("wa_lines")
+              .update({ last_assigned_at: new Date().toISOString() })
+              .eq("id", chosen.id);
+          } catch {}
         }
       }
-
-      // 0.2) Fallback global - sólo para tu cuenta si nada matchea
-      if (!waLineIdToStore && WA_DEFAULT_LINE_ID) {
-        waLineIdToStore = WA_DEFAULT_LINE_ID;
-      }
-    } catch (err) {
-      console.error(
-        "[landing-events] Error resolviendo wa_line_id multi-tenant:",
-        err
-      );
-      // si explota esto, igual seguimos y guardamos el evento sin wa_line_id
     }
 
-    const safeAmount =
-      typeof amount === "number" && !Number.isNaN(amount) ? amount : null;
+    const safeAmount = safeNum(amount);
 
     // ========================
     // 1) Guardar evento en DB
@@ -133,21 +115,16 @@ export async function POST(req: NextRequest) {
       screenshot_url: screenshotUrl ?? null,
       visitor_ip: visitorIp,
       user_agent: userAgent,
-      wa_line_id: waLineIdToStore ?? null, // 👈 multi-tenant
+      wa_line_id: waLineIdToStore ?? null, // <-- SIEMPRE external_line_id (cmj...)
     });
 
     if (error) {
       console.error("[landing-events] Error insertando evento:", error);
-      return NextResponse.json(
-        { ok: false, error: "Error al guardar evento" },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: "Error al guardar evento" }, { status: 500 });
     }
 
     // ========================
-    // 2) Enviar a Meta CAPI
-    //    - conversion  -> Purchase
-    //    - chat        -> Contact
+    // 2) Enviar a Meta CAPI (opcional)
     // ========================
     if (eventType === "conversion" || eventType === "chat") {
       await sendMetaEvent({
@@ -163,17 +140,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (e: any) {
     console.error("[landing-events] Excepción:", e);
-    return NextResponse.json(
-      { ok: false, error: e?.message || "Error interno" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message || "Error interno" }, { status: 500 });
   }
 }
 
 /* ============================================================
-   HELPER: enviar evento a Meta Conversions API
+   Meta Conversions API (si tu meta_access_token es real)
    ============================================================ */
-
 async function sendMetaEvent(opts: {
   landingId: string;
   eventType: EventType;
@@ -185,7 +158,6 @@ async function sendMetaEvent(opts: {
   const { landingId, eventType, amount, visitorIp, userAgent, waPhone } = opts;
 
   try {
-    // 1) Traer pixel y access token de ESA landing
     const { data: landing, error } = await supabaseAdmin
       .from("landing_pages")
       .select("id, slug, meta_pixel_id, meta_access_token")
@@ -193,57 +165,36 @@ async function sendMetaEvent(opts: {
       .maybeSingle();
 
     if (error) {
-      console.error(
-        "[META CAPI] Error leyendo landing_pages:",
-        error.message
-      );
+      console.error("[META CAPI] Error leyendo landing_pages:", error.message);
       return;
     }
     if (!landing) {
-      console.warn(
-        "[META CAPI] Landing no encontrada para landingId=",
-        landingId
-      );
+      console.warn("[META CAPI] Landing no encontrada:", landingId);
       return;
     }
 
     const pixelId = (landing as any).meta_pixel_id as string | null;
     const accessToken = (landing as any).meta_access_token as string | null;
+    if (!pixelId || !accessToken) return;
 
-    if (!pixelId || !accessToken) {
-      console.warn(
-        "[META CAPI] landing sin meta_pixel_id o meta_access_token, no se envía a CAPI. landingId=",
-        landingId
-      );
-      return;
-    }
-
-    // 2) Nombre de evento
     const eventName =
-      eventType === "conversion"
-        ? "Purchase"
-        : eventType === "chat"
-        ? "Contact"
-        : null;
-
-    if (!eventName) return; // solo mandamos conversion + chat
+      eventType === "conversion" ? "Purchase" :
+      eventType === "chat" ? "Contact" : null;
+    if (!eventName) return;
 
     const endpoint = `https://graph.facebook.com/v19.0/${pixelId}/events`;
     const eventTime = Math.floor(Date.now() / 1000);
 
-    // 3) user_data (IP + User-Agent)
     const user_data: Record<string, any> = {};
     if (visitorIp) user_data.client_ip_address = visitorIp;
     if (userAgent) user_data.client_user_agent = userAgent;
 
-    // 4) custom_data solo para Purchase
     const custom_data: Record<string, any> = {};
     if (eventName === "Purchase" && typeof amount === "number" && amount > 0) {
       custom_data.value = amount;
       custom_data.currency = "ARS";
     }
 
-    // URL pública de la landing
     const PUBLIC_FRONTEND_BASE_URL =
       process.env.NEXT_PUBLIC_SITE_URL ||
       process.env.FRONTEND_BASE_URL ||
@@ -274,24 +225,12 @@ async function sendMetaEvent(opts: {
     });
 
     const text = await res.text();
-
     if (!res.ok) {
-      console.error(
-        `[META CAPI] Error HTTP al enviar ${eventName}:`,
-        res.status,
-        text
-      );
+      console.error(`[META CAPI] Error HTTP ${eventName}:`, res.status, text);
     } else {
-      console.log(
-        `[META CAPI] ${eventName} enviado OK → landingId=`,
-        (landing as any).id,
-        "phone=",
-        waPhone || null,
-        "amount=",
-        amount ?? null
-      );
+      console.log(`[META CAPI] ${eventName} OK ->`, landingId, waPhone || null, amount ?? null);
     }
   } catch (e) {
-    console.error("[META CAPI] Excepción al enviar evento:", e);
+    console.error("[META CAPI] Excepción:", e);
   }
 }
