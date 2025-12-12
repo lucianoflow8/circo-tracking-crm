@@ -14,9 +14,7 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 const toDigits = (value: string | null | undefined) =>
   (value || "").replace(/\D/g, "");
 
-// ========= GET: devuelve mensajes desde CrmMessage =========
-// ========= GET: intenta traer mensajes con media desde WA-SERVER;
-// si falla, usa solo los textos guardados en CrmMessage =========
+// ========= GET: combina mensajes de WA-SERVER + CrmMessage =========
 export async function GET(
   _req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
@@ -28,16 +26,12 @@ export async function GET(
     return NextResponse.json({ messages: [] }, { status: 200 });
   }
 
-  // 👤 usuario dueño
   const userId = await getCurrentUserId();
   if (!userId) {
     return NextResponse.json({ error: "No autenticado" }, { status: 401 });
   }
 
-  // ===== 1) Intentar leer directo del WA-SERVER (con media) =====
-  const jid = `${phone}@c.us`;
-
-  // buscamos la última línea con la que habló este teléfono (igual que en el POST)
+  // ==== Resolvem​os la línea a usar ====
   let lineId = DEFAULT_LINE_ID;
   try {
     const lastMsg = await prisma.crmMessage.findFirst({
@@ -58,229 +52,117 @@ export async function GET(
     );
   }
 
-  let waMessages: any[] | null = null;
+  const jid = `${phone}@c.us`;
 
-  try {
-    const waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(
-        lineId
-      )}/chats/${encodeURIComponent(jid)}/messages`
-    );
+  // ==== Traemos en paralelo WA-SERVER + Prisma ====
+  const [waMessagesRaw, dbRows] = await Promise.all([
+    (async () => {
+      try {
+        const waRes = await fetch(
+          `${WA_SERVER_URL}/lines/${encodeURIComponent(
+            lineId
+          )}/chats/${encodeURIComponent(jid)}/messages`
+        );
 
-    if (waRes.ok) {
-      const waData = await waRes.json();
-      waMessages = waData.messages || [];
-    } else {
-      const text = await waRes.text();
-      console.error(
-        "[API/CHAT MESSAGES GET] WA-SERVER messages error:",
-        waRes.status,
-        text.slice(0, 300)
-      );
-    }
-  } catch (err) {
-    console.error(
-      "[API/CHAT MESSAGES GET] Error llamando a WA-SERVER",
-      err
-    );
-  }
+        if (!waRes.ok) {
+          const text = await waRes.text();
+          console.error(
+            "[API/CHAT MESSAGES GET] WA-SERVER messages error:",
+            waRes.status,
+            text.slice(0, 300)
+          );
+          return [] as any[];
+        }
 
-  // Si WA-SERVER respondió bien, usamos esos mensajes (ya vienen con media, tipo, estado, etc.)
-  if (waMessages && waMessages.length) {
-    // nos aseguramos que vengan ordenados por fecha ascendente
-    waMessages.sort(
-      (a: any, b: any) =>
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
-    return NextResponse.json({ messages: waMessages }, { status: 200 });
-  }
-
-  // ===== 2) Fallback: sólo textos desde CrmMessage (sin media) =====
-  try {
-    const rows = await prisma.crmMessage.findMany({
-      where: {
-        phone,
-        ownerId: userId,
-      },
-      orderBy: { createdAt: "asc" },
-    });
-
-    const messages = rows.map((row) => {
-      return {
-        id: row.waMessageId || row.id,
-        fromMe: row.direction === "out",
-        body: row.body || "",
-        timestamp: row.createdAt.toISOString(),
-        status: row.direction === "out" ? ("sent" as const) : undefined,
-        type: (row.msgType as any) || "text",
-        media: null, // sin media en fallback
-        senderName: undefined,
-        senderNumber: row.phone,
-        senderAvatar: null,
-      };
-    });
-
-    return NextResponse.json({ messages }, { status: 200 });
-  } catch (err) {
-    console.error("Error /api/chats/[chatId]/messages GET (fallback)", err);
-    return NextResponse.json({ messages: [] }, { status: 200 });
-  }
-}
-// ========= POST: enviar mensaje Y guardarlo en CrmMessage =========
-export async function POST(
-  req: NextRequest,
-  context: { params: { chatId: string } | Promise<{ chatId: string }> }
-) {
-  try {
-    const { chatId } = await unwrapParams(context.params);
-    const bodyJson = await req.json();
-    const { body, media } = bodyJson || {};
-
-    // Aceptamos mensaje sólo texto, sólo media o ambos
-    if ((!body || typeof body !== "string") && !media) {
-      return NextResponse.json(
-        { error: "Se requiere body (texto) o media" },
-        { status: 400 }
-      );
-    }
-
-    const phone = toDigits(chatId);
-    if (!phone) {
-      return NextResponse.json(
-        { error: "chatId inválido" },
-        { status: 400 }
-      );
-    }
-
-    // 👤 usuario dueño
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    // Elegimos la línea: última con la que habló este teléfono (de este dueño)
-    let lineId = DEFAULT_LINE_ID;
-    try {
-      const lastMsg = await prisma.crmMessage.findFirst({
-        where: {
-          phone,
-          ownerId: userId,
-        },
-        orderBy: { createdAt: "desc" },
-      });
-      if (lastMsg?.lineId) {
-        lineId = lastMsg.lineId;
+        const waData = await waRes.json();
+        const arr = (waData?.messages ?? []) as any[];
+        return Array.isArray(arr) ? arr : [];
+      } catch (err) {
+        console.error(
+          "[API/CHAT MESSAGES GET] Error llamando a WA-SERVER",
+          err
+        );
+        return [] as any[];
       }
-    } catch (err) {
-      console.error(
-        "[API/CHAT MESSAGES POST] Error buscando línea para phone",
-        phone,
-        err
-      );
-    }
-
-    const jid = `${phone}@c.us`;
-
-    // 1) Enviamos al WA-SERVER
-    const waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(
-        lineId
-      )}/chats/${encodeURIComponent(jid)}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body, media }),
+    })(),
+    (async () => {
+      try {
+        return await prisma.crmMessage.findMany({
+          where: {
+            phone,
+            ownerId: userId,
+          },
+          orderBy: { createdAt: "asc" },
+        });
+      } catch (err) {
+        console.error(
+          "[API/CHAT MESSAGES GET] Error leyendo CrmMessage (fallback)",
+          err
+        );
+        return [];
       }
-    );
+    })(),
+  ]);
 
-    if (!waRes.ok) {
-      const text = await waRes.text();
-      console.error(
-        "WA-SERVER messages POST error:",
-        waRes.status,
-        text
-      );
-
-      return NextResponse.json(
-        { error: "Error al enviar mensaje a WA-SERVER" },
-        { status: 500 }
-      );
-    }
-
-    let waData: any = null;
-    try {
-      waData = await waRes.json();
-    } catch {
-      waData = null;
-    }
-
-    // 2) Determinar tipo de mensaje
-    let msgType: string = "text";
-    if (media) {
-      const mt: string = media.mimetype || "";
-      if (mt.startsWith("image/")) msgType = "image";
-      else if (mt.startsWith("audio/")) msgType = "audio";
-      else if (mt === "application/pdf" || mt.startsWith("application/"))
-        msgType = "document";
-      else msgType = "media";
-    }
-
-    // 3) ID de WhatsApp estable (para evitar duplicados)
-    const waMessageId: string =
-      (waData &&
-        (waData.message?.id?.id ||
-          waData.message?.id ||
-          waData.messageId ||
-          waData.key?.id)) ||
-      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    // 4) Guardar / actualizar en CrmMessage (por si el WA-SERVER también guarda)
-    const created = await prisma.crmMessage.upsert({
-      where: { waMessageId },
-      update: {
-        phone,
-        ownerId: userId,
-        lineId,
-        direction: "out",
-        body: body || "",
-        msgType,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
-      create: {
-        phone,
-        ownerId: userId,
-        lineId,
-        direction: "out",
-        body: body || "",
-        msgType,
-        waMessageId,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
-    });
-
-    // 5) Normalizar para el front exactamente igual que en el GET
-    const saved = {
-      id: created.waMessageId || created.id,
-      fromMe: true,
-      body: created.body || "",
-      timestamp: created.createdAt.toISOString(),
-      status: "sent" as const,
-      type: (created.msgType as any) || "text",
-      media: media ?? null, // si era media y venía del front, la reutilizamos
+  // Normalizamos los mensajes de Prisma al mismo formato que usamos en el front
+  const dbMessages = dbRows.map((row) => {
+    const id = row.waMessageId || row.id;
+    return {
+      id,
+      fromMe: row.direction === "out",
+      body: row.body || "",
+      timestamp: row.createdAt.toISOString(),
+      status: row.direction === "out" ? ("sent" as const) : undefined,
+      type: (row.msgType as any) || "text",
+      media: null,
       senderName: undefined,
-      senderNumber: created.phone,
+      senderNumber: row.phone,
       senderAvatar: null,
     };
+  });
 
-    return NextResponse.json({ message: saved }, { status: 200 });
-  } catch (err: any) {
-    console.error("Error /api/chats/[chatId]/messages POST", err);
-    return NextResponse.json(
-      { error: err?.message || "Error interno al enviar mensaje" },
-      { status: 500 }
-    );
+  // Si no hay nada de ninguno, devolvemos vacío
+  if (!waMessagesRaw.length && !dbMessages.length) {
+    return NextResponse.json({ messages: [] }, { status: 200 });
   }
+
+  // ==== Merge WA + DB por id, dando prioridad a WA para status/type/timestamp ====
+  const byId = new Map<string, any>();
+
+  // Primero metemos lo que viene de DB
+  for (const m of dbMessages) {
+    if (!m.id) continue;
+    byId.set(String(m.id), { ...m });
+  }
+
+  // Ahora pisamos/completamos con lo de WA-SERVER
+  for (const wm of waMessagesRaw) {
+    const rawId = wm?.id || wm?.waMessageId || wm?.key?.id;
+    if (!rawId) continue;
+
+    const id = String(rawId);
+    const prev = byId.get(id) || {};
+
+    const tsIso =
+      typeof wm.timestamp === "string"
+        ? wm.timestamp
+        : wm.timestamp
+        ? new Date(wm.timestamp).toISOString()
+        : prev.timestamp || new Date().toISOString();
+
+    byId.set(id, {
+      ...prev,
+      ...wm,
+      id,
+      timestamp: tsIso,
+    });
+  }
+
+  // A array + orden cronológico ascendente
+  const merged = Array.from(byId.values()).sort(
+    (a, b) =>
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
+  return NextResponse.json({ messages: merged }, { status: 200 });
 }
