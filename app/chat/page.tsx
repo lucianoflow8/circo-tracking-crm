@@ -80,39 +80,46 @@ const formatMessageBody = (msg: Message): string => {
   let body = msg.body ?? "";
   const trimmed = body.trim();
 
-  const hasMediaObj = !!msg.media;
-  const hasMediaPreview =
+  const hasMedia = !!msg.media;
+  const hasPreview =
     !!msg.media &&
     typeof msg.media.dataUrl === "string" &&
     msg.media.dataUrl.trim() !== "";
 
-  // caso sin texto
+  // === SIN TEXTO ===
   if (!trimmed) {
-    if (hasMediaObj && hasMediaPreview) {
-      // Tenemos media con preview (imagen/audio/documento que el front puede mostrar).
-      // - imagen/audio: dejamos body vacío (solo se ve la imagen o el reproductor)
-      // - documento: si no hay nombre, usamos un fallback
+    if (hasMedia && (hasPreview || msg.fromMe)) {
+      // Tenemos media "real" (o es un mensaje tuyo que guardamos con dataUrl):
+      // - imagen/audio: dejamos body vacío → solo se ve la imagen/audio
+      // - documento sin nombre: ponemos fallback
       if (msg.type === "document" && !msg.media?.fileName) {
         body = "📄 Documento";
       } else {
         body = "";
       }
     } else {
-      // No tenemos preview (lo que pasa con muchos mensajes que vienen desde WA-SERVER).
-      // Mostramos un texto para que al menos se vea algo en la burbuja.
-      if (msg.type === "image") {
-        body = "📷 Imagen";
-      } else if (msg.type === "audio") {
-        body = "🎧 Audio";
-      } else if (msg.type === "document") {
-        body = msg.media?.fileName || "📄 Documento";
+      // NO tenemos preview (lo típico de lo que VIENE desde WhatsApp)
+      // Solo acá mostramos iconitos, y SOLO para mensajes que NO son tuyos
+      if (!msg.fromMe) {
+        if (msg.type === "image") {
+          body = "📷 Imagen";
+        } else if (msg.type === "audio") {
+          body = "🎧 Audio";
+        } else if (msg.type === "document") {
+          body = msg.media?.fileName || "📄 Documento";
+        } else if (msg.media) {
+          body = "[adjunto]";
+        } else {
+          body = "";
+        }
       } else {
-        body = "[adjunto]";
+        // Mensaje tuyo sin preview ni texto → lo dejamos vacío
+        body = "";
       }
     }
   }
 
-  // prefijo de nombre para grupos
+  // === Prefijo de nombre para grupos ===
   if (!msg.fromMe && msg.senderName) {
     const core = body.trim();
     if (!core) {
