@@ -79,50 +79,46 @@ const getAvatarFromChat = (
 const formatMessageBody = (msg: Message): string => {
   let body = msg.body ?? "";
   const trimmed = body.trim();
+  const hasMedia = !!msg.media;
 
-  const hasMediaObj = !!msg.media;
-
-  // caso sin texto
+  // 🧩 Caso: SIN texto
   if (!trimmed) {
-    if (hasMediaObj) {
-      // media presente
-      if (msg.type === "image") {
-        body = ""; // solo imagen (el componente ya la muestra)
-      } else if (msg.type === "document") {
-        body = msg.media?.fileName || "📄 Documento";
-      } else if (msg.type === "audio") {
-        body = ""; // solo reproductor
-      } else {
-        body = "[adjunto]";
-      }
-    } else {
-      // sin media en el objeto pero con tipo marcado desde backend
-      if (msg.type === "image") {
-        body = "📷 Imagen";
-      } else if (msg.type === "audio") {
-        body = "🎧 Audio";
-      } else if (msg.type === "document") {
-        body = "📄 Documento";
-      } else {
-        body = "[adjunto]";
-      }
+    // Si hay media (imagen/audio/doc) enviada desde el CRM,
+    // dejamos que se vea SOLO el componente visual (imagen, tarjeta, audio).
+    if (hasMedia) {
+      return "";
+    }
+
+    // Si NO hay media en el objeto pero sí viene el type,
+    // es algo recibido desde WhatsApp sin archivo cargado en el CRM.
+    switch (msg.type) {
+      case "image":
+        return "📷 Imagen";
+      case "audio":
+        return "🎧 Audio";
+      case "document":
+        return "📄 Documento";
+      case "media":
+      case "unknown":
+      default:
+        return "[adjunto]";
     }
   }
 
-  // prefijo de nombre para grupos
+  // 🧩 Caso: HAY texto
+  let finalBody = trimmed;
+
+  // Prefijo con nombre en grupos / mensajes entrantes
   if (!msg.fromMe && msg.senderName) {
-    const core = body.trim();
-    if (!core) {
-      body = msg.senderName;
-    } else if (
-      !core.startsWith(msg.senderName + "\n") &&
-      !core.startsWith(msg.senderName + " ")
+    if (
+      !finalBody.startsWith(msg.senderName + "\n") &&
+      !finalBody.startsWith(msg.senderName + " ")
     ) {
-      body = `${msg.senderName}\n${core}`;
+      finalBody = `${msg.senderName}\n${finalBody}`;
     }
   }
 
-  return body;
+  return finalBody;
 };
 
 const formatPhone = (raw: string | null): string | null => {
