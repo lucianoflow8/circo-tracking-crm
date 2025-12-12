@@ -9,7 +9,7 @@ export const revalidate = 0;
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-// Cliente server-side
+// Cliente server-side (usa anon key, pero filtramos por owner_id)
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 type LandingPageRow = {
@@ -24,7 +24,7 @@ type LandingEventRow = {
   event_type: string;
   created_at: string | null;
   amount: number | null;
-  wa_phone: string | null; // 👈 importante para deduplicar por número
+  wa_phone: string | null; // para dedupe por número
 };
 
 type AnalyticsPoint = {
@@ -33,7 +33,7 @@ type AnalyticsPoint = {
   pageName: string;
   visits: number;
   clicks: number;
-  chats: number;       // chats únicos (wa_phone)
+  chats: number; // chats únicos (wa_phone)
   conversions: number; // conversiones únicas (wa_phone)
   revenue: number;
 };
@@ -43,6 +43,19 @@ type AnalyticsApiResponse = {
   points: AnalyticsPoint[];
   error?: string;
 };
+
+function displayName(lp: LandingPageRow) {
+  const slug = (lp.slug || "").trim();
+  const internal = (lp.internal_name || "").trim();
+
+  // ✅ prioridad: slug (lo usás como “código” en el mensaje y es único)
+  if (slug) return slug;
+
+  // fallback: internal_name si no hay slug
+  if (internal) return internal;
+
+  return `Landing ${lp.id.slice(0, 8)}`;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -66,7 +79,7 @@ export async function GET(req: NextRequest) {
     const { data: landingPages, error: lpError } = await supabase
       .from("landing_pages")
       .select("id, internal_name, slug, created_at")
-      .eq("owner_id", currentUserId) // 👈 solo mis landings
+      .eq("owner_id", currentUserId)
       .order("created_at", { ascending: true });
 
     if (lpError) {
@@ -82,18 +95,14 @@ export async function GET(req: NextRequest) {
     const landingPageRows = (landingPages || []) as LandingPageRow[];
 
     if (landingPageRows.length === 0) {
-      const resp: AnalyticsApiResponse = {
-        pages: [],
-        points: [],
-      };
+      const resp: AnalyticsApiResponse = { pages: [], points: [] };
       return NextResponse.json(resp, { status: 200 });
     }
 
+    // Map landingId -> nombre visible
     const pageMap = new Map<string, string>();
     for (const lp of landingPageRows) {
-      const name =
-        lp.internal_name || lp.slug || `Landing ${lp.id.slice(0, 8)}`;
-      pageMap.set(lp.id, name);
+      pageMap.set(lp.id, displayName(lp));
     }
 
     const landingIds = landingPageRows.map((lp) => lp.id);
@@ -104,12 +113,8 @@ export async function GET(req: NextRequest) {
       .select("landing_id, event_type, amount, created_at, wa_phone")
       .in("landing_id", landingIds);
 
-    if (from) {
-      eventsQuery = eventsQuery.gte("created_at", `${from}T00:00:00`);
-    }
-    if (to) {
-      eventsQuery = eventsQuery.lte("created_at", `${to}T23:59:59`);
-    }
+    if (from) eventsQuery = eventsQuery.gte("created_at", `${from}T00:00:00`);
+    if (to) eventsQuery = eventsQuery.lte("created_at", `${to}T23:59:59`);
     if (landingIdFilter && landingIdFilter !== "all") {
       eventsQuery = eventsQuery.eq("landing_id", landingIdFilter);
     }
@@ -119,11 +124,7 @@ export async function GET(req: NextRequest) {
     if (evError) {
       console.error("[API/ANALYTICS] Error landing_events:", evError);
       const resp: AnalyticsApiResponse = {
-        pages: landingPageRows.map((lp) => ({
-          id: lp.id,
-          name:
-            lp.internal_name || lp.slug || `Landing ${lp.id.slice(0, 8)}`,
-        })),
+        pages: landingPageRows.map((lp) => ({ id: lp.id, name: displayName(lp) })),
         points: [],
         error: "No se pudieron cargar los eventos",
       };
@@ -132,13 +133,8 @@ export async function GET(req: NextRequest) {
 
     const eventRows = (events || []) as LandingEventRow[];
 
-    // ⚠️ Ordenamos por fecha ascendente para que "la primera vez"
-    // que aparece un número defina el día donde cuenta el chat/conversión
-    eventRows.sort((a, b) => {
-      const da = a.created_at || "";
-      const db = b.created_at || "";
-      return da.localeCompare(db);
-    });
+    // Orden asc: para que la 1ra vez que aparece un número defina el día
+    eventRows.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
 
     // 3) Agrupar por fecha + landing_id
     const map = new Map<string, AnalyticsPoint>();
@@ -147,23 +143,18 @@ export async function GET(req: NextRequest) {
     const globalChatPhones = new Map<string, Set<string>>(); // landingId -> set phones
     const globalConvPhones = new Map<string, Set<string>>(); // landingId -> set phones
 
-    const ensureGlobalSet = (
-      store: Map<string, Set<string>>,
-      landingId: string
-    ) => {
-      if (!store.has(landingId)) {
-        store.set(landingId, new Set<string>());
-      }
+    const ensureGlobalSet = (store: Map<string, Set<string>>, landingId: string) => {
+      if (!store.has(landingId)) store.set(landingId, new Set<string>());
       return store.get(landingId)!;
     };
 
     for (const row of eventRows) {
       if (!row.created_at) continue;
+
       const date = row.created_at.slice(0, 10); // YYYY-MM-DD
       const landingId = row.landing_id;
-      const pageName =
-        pageMap.get(landingId) || `Landing ${landingId.slice(0, 8)}`;
 
+      const pageName = pageMap.get(landingId) || `Landing ${landingId.slice(0, 8)}`;
       const key = `${date}_${landingId}`;
 
       if (!map.has(key)) {
@@ -197,35 +188,24 @@ export async function GET(req: NextRequest) {
             const set = ensureGlobalSet(globalChatPhones, landingId);
             const before = set.size;
             set.add(phone);
-            // solo sumamos si es la primera vez que ese número chatea en esa landing
-            if (set.size > before) {
-              p.chats += 1;
-            }
+            if (set.size > before) p.chats += 1;
           } else {
-            // fallback si no tenemos teléfono
             p.chats += 1;
           }
           break;
         }
 
         case "conversion": {
-          // siempre sumamos revenue
           const amt =
-            typeof row.amount === "number" && !Number.isNaN(row.amount)
-              ? row.amount
-              : 0;
+            typeof row.amount === "number" && !Number.isNaN(row.amount) ? row.amount : 0;
           p.revenue += amt;
 
           if (phone) {
             const set = ensureGlobalSet(globalConvPhones, landingId);
             const before = set.size;
             set.add(phone);
-            // solo sumamos si es la primera vez que este número convierte en esa landing
-            if (set.size > before) {
-              p.conversions += 1;
-            }
+            if (set.size > before) p.conversions += 1;
           } else {
-            // fallback si no vino teléfono
             p.conversions += 1;
           }
           break;
@@ -236,16 +216,10 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const points = Array.from(map.values()).sort((a, b) =>
-      a.date.localeCompare(b.date)
-    );
+    const points = Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
 
     const response: AnalyticsApiResponse = {
-      pages: landingPageRows.map((lp) => ({
-        id: lp.id,
-        name:
-          lp.internal_name || lp.slug || `Landing ${lp.id.slice(0, 8)}`,
-      })),
+      pages: landingPageRows.map((lp) => ({ id: lp.id, name: displayName(lp) })),
       points,
     };
 
