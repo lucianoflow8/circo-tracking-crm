@@ -8,15 +8,10 @@ export async function POST(req: Request) {
     const { email, password } = await req.json();
 
     if (!email || !password) {
-      return NextResponse.json(
-        { error: "Faltan campos" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Faltan campos" }, { status: 400 });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email },
-    });
+    const user = await prisma.user.findUnique({ where: { email } });
 
     if (!user) {
       return NextResponse.json(
@@ -26,7 +21,6 @@ export async function POST(req: Request) {
     }
 
     const isValid = await bcrypt.compare(password, user.passwordHash);
-
     if (!isValid) {
       return NextResponse.json(
         { error: "Usuario o contraseña incorrectos" },
@@ -41,22 +35,19 @@ export async function POST(req: Request) {
       createdAt: user.createdAt,
     };
 
-    // 👉 armamos la respuesta
     const res = NextResponse.json({ user: safeUser }, { status: 200 });
 
-    // 👉 seteamos cookie con el id del usuario
     res.cookies.set("crm_user_id", safeUser.id, {
       path: "/",
       httpOnly: true,
       sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 60 * 60 * 24 * 30, // 30 días
     });
 
     return res;
   } catch (error) {
     console.error("Login error", error);
-    return NextResponse.json(
-      { error: "Error interno en login" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error interno en login" }, { status: 500 });
   }
 }
