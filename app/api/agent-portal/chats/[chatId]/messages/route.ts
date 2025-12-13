@@ -6,13 +6,22 @@ import { getCurrentUserId } from "@/lib/auth";
 const WA_SERVER_URL = process.env.WA_SERVER_URL!;
 const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
 
-// Helpers
 async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
   return await Promise.resolve(params);
 }
 
-const toDigits = (value: string | null | undefined) =>
-  (value || "").replace(/\D/g, "");
+const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
+
+async function ensureConnected(lineId: string, ownerId: string) {
+  // Intenta conectar sin romper si ya está conectada
+  try {
+    await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerId }),
+    }).catch(() => null);
+  } catch {}
+}
 
 /* ============================================================
    GET: leer mensajes (WA-SERVER si puede, fallback CrmMessage)
@@ -28,63 +37,58 @@ export async function GET(
     return NextResponse.json({ messages: [] }, { status: 200 });
   }
 
+  // Owner (para autoconnect)
+  const ownerId = (await getCurrentUserId()) || null;
+
   // Línea: última con la que habló ese teléfono
   let lineId = DEFAULT_LINE_ID;
   try {
     const lastMsg = await prisma.crmMessage.findFirst({
-      where: {
-        phone,
-        // si querés filtrar por ownerId también podés agregarlo acá
-      },
+      where: { phone },
       orderBy: { createdAt: "desc" },
     });
-    if (lastMsg?.lineId) {
-      lineId = lastMsg.lineId;
-    }
+    if (lastMsg?.lineId) lineId = lastMsg.lineId;
   } catch (err) {
-    console.error(
-      "[agent-portal/messages GET] Error buscando línea para phone",
-      phone,
-      err
-    );
+    console.error("[agent-portal/messages GET] Error buscando línea para phone", phone, err);
   }
 
   const jid = `${phone}@c.us`;
-  console.log("[agent-portal/messages GET] lineId=", lineId, "chatId=", jid);
 
   // 1) Intentar traer desde WA-SERVER (con media)
   let waMessages: any[] | null = null;
 
   try {
-    const waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(
-        lineId
-      )}/chats/${encodeURIComponent(jid)}/messages`
+    let waRes = await fetch(
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+      { cache: "no-store" }
     );
+
+    // Si no hay sesión, autoconnect y reintentar 1 vez
+    if (!waRes.ok) {
+      const text = await waRes.text().catch(() => "");
+      if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
+        await ensureConnected(lineId, ownerId);
+        waRes = await fetch(
+          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+          { cache: "no-store" }
+        );
+      }
+    }
 
     if (waRes.ok) {
       const waData = await waRes.json().catch(() => ({} as any));
       waMessages = waData.messages || [];
     } else {
       const text = await waRes.text().catch(() => "");
-      console.error(
-        "[agent-portal/messages GET] WA-SERVER error",
-        waRes.status,
-        text.slice(0, 300)
-      );
+      console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, text.slice(0, 300));
     }
   } catch (err) {
-    console.error(
-      "[agent-portal/messages GET] Error llamando a WA-SERVER",
-      err
-    );
+    console.error("[agent-portal/messages GET] Error llamando a WA-SERVER", err);
   }
 
-  // Si WA-SERVER respondió, usamos eso
   if (waMessages && waMessages.length) {
     waMessages.sort(
-      (a: any, b: any) =>
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
     return NextResponse.json({ messages: waMessages }, { status: 200 });
   }
@@ -92,9 +96,7 @@ export async function GET(
   // 2) Fallback: sólo lo de CrmMessage (sin media)
   try {
     const rows = await prisma.crmMessage.findMany({
-      where: {
-        phone,
-      },
+      where: { phone },
       orderBy: { createdAt: "asc" },
     });
 
@@ -113,10 +115,7 @@ export async function GET(
 
     return NextResponse.json({ messages }, { status: 200 });
   } catch (err) {
-    console.error(
-      "[agent-portal/messages GET] Error fallback CrmMessage",
-      err
-    );
+    console.error("[agent-portal/messages GET] Error fallback CrmMessage", err);
     return NextResponse.json({ messages: [] }, { status: 200 });
   }
 }
@@ -133,107 +132,80 @@ export async function POST(
     const bodyJson = await req.json().catch(() => ({} as any));
     const { body, media } = bodyJson || {};
 
-    // permitimos: solo texto, solo media o ambos
     if ((!body || typeof body !== "string") && !media) {
-      return NextResponse.json(
-        { error: "Se requiere body (texto) o media" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Se requiere body (texto) o media" }, { status: 400 });
     }
 
     const phone = toDigits(chatId);
-    if (!phone) {
-      return NextResponse.json(
-        { error: "chatId inválido" },
-        { status: 400 }
-      );
-    }
+    if (!phone) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
 
-    // dueño (el mismo usuario logueado que ve el portal)
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
-      );
-    }
+    if (!userId) return NextResponse.json({ error: "No autenticado" }, { status: 401 });
 
-    // línea: última que usó ese teléfono para ese owner
     let lineId = DEFAULT_LINE_ID;
+
     try {
       const lastMsg = await prisma.crmMessage.findFirst({
-        where: {
-          phone,
-          ownerId: userId,
-        },
+        where: { phone, ownerId: userId },
         orderBy: { createdAt: "desc" },
       });
-      if (lastMsg?.lineId) {
-        lineId = lastMsg.lineId;
-      }
+      if (lastMsg?.lineId) lineId = lastMsg.lineId;
     } catch (err) {
-      console.error(
-        "[agent-portal/messages POST] Error buscando línea para phone",
-        phone,
-        err
-      );
+      console.error("[agent-portal/messages POST] Error buscando línea para phone", phone, err);
     }
 
     const jid = `${phone}@c.us`;
 
-    // 1) Enviar al WA-SERVER
-    const waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(
-        lineId
-      )}/chats/${encodeURIComponent(jid)}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body, media }),
-      }
-    );
-
-    if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      console.error(
-        "[agent-portal/messages POST] WA-SERVER error",
-        waRes.status,
-        text
-      );
-      return NextResponse.json(
-        { error: "Error al enviar mensaje a WA-SERVER" },
-        { status: 500 }
-      );
-    }
-
-    let waData: any = null;
-    try {
-      waData = await waRes.json();
-    } catch {
-      waData = null;
-    }
-
-    // 2) Tipo de mensaje
+    // Tipo de mensaje
     let msgType: string = "text";
     if (media) {
       const mt: string = media.mimetype || "";
       if (mt.startsWith("image/")) msgType = "image";
       else if (mt.startsWith("audio/")) msgType = "audio";
-      else if (mt === "application/pdf" || mt.startsWith("application/"))
-        msgType = "document";
+      else if (mt === "application/pdf" || mt.startsWith("application/")) msgType = "document";
       else msgType = "media";
     }
 
-    // 3) ID estable de mensaje de WhatsApp
+    // Enviar a WA-SERVER
+    let waRes = await fetch(
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body, media, type: msgType }),
+      }
+    );
+
+    // Session not found => autoconnect y retry 1 vez
+    if (!waRes.ok) {
+      const text = await waRes.text().catch(() => "");
+      if (waRes.status === 404 && text.includes("Session not found")) {
+        await ensureConnected(lineId, userId);
+        waRes = await fetch(
+          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ body, media, type: msgType }),
+          }
+        );
+      }
+    }
+
+    if (!waRes.ok) {
+      const text = await waRes.text().catch(() => "");
+      console.error("[agent-portal/messages POST] WA-SERVER error", waRes.status, text);
+      return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
+    }
+
+    const waData = await waRes.json().catch(() => null);
+
     const waMessageId: string =
       (waData &&
-        (waData.message?.id?.id ||
-          waData.message?.id ||
-          waData.messageId ||
-          waData.key?.id)) ||
+        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // 4) Guardar / actualizar en CrmMessage
+    // Guardar en DB
     const created = await prisma.crmMessage.upsert({
       where: { waMessageId },
       update: {
@@ -257,7 +229,6 @@ export async function POST(
       },
     });
 
-    // 5) Normalizar para el front
     const saved = {
       id: created.waMessageId || created.id,
       fromMe: true,
@@ -274,9 +245,6 @@ export async function POST(
     return NextResponse.json({ message: saved }, { status: 200 });
   } catch (err: any) {
     console.error("[agent-portal/messages POST] Error interno", err);
-    return NextResponse.json(
-      { error: err?.message || "Error interno al enviar mensaje" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Error interno" }, { status: 500 });
   }
 }

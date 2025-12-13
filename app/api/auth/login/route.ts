@@ -1,53 +1,57 @@
 // app/api/auth/login/route.ts
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
+import { prisma } from "@/lib/prisma";
+import { signSession, setSessionCookie } from "@/lib/auth";
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const { email, password } = await req.json();
+    const body = await req.json().catch(() => ({} as any));
+    const email = String(body?.email || "").trim().toLowerCase();
+    const password = String(body?.password || "");
 
     if (!email || !password) {
-      return NextResponse.json({ error: "Faltan campos" }, { status: 400 });
+      return NextResponse.json({ error: "Email y password requeridos" }, { status: 400 });
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
-
-    if (!user) {
-      return NextResponse.json(
-        { error: "Usuario o contraseña incorrectos" },
-        { status: 401 }
-      );
-    }
-
-    const isValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isValid) {
-      return NextResponse.json(
-        { error: "Usuario o contraseña incorrectos" },
-        { status: 401 }
-      );
-    }
-
-    const safeUser = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      createdAt: user.createdAt,
-    };
-
-    const res = NextResponse.json({ user: safeUser }, { status: 200 });
-
-    res.cookies.set("crm_user_id", safeUser.id, {
-      path: "/",
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 60 * 60 * 24 * 30, // 30 días
+    // Ajustá estos campos si tu User model difiere:
+    // - email: string (unique)
+    // - passwordHash: string
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        passwordHash: true,
+      },
     });
 
-    return res;
-  } catch (error) {
-    console.error("Login error", error);
-    return NextResponse.json({ error: "Error interno en login" }, { status: 500 });
+    if (!user || !user.passwordHash) {
+      return NextResponse.json({ error: "Credenciales inválidas" }, { status: 401 });
+    }
+
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      return NextResponse.json({ error: "Credenciales inválidas" }, { status: 401 });
+    }
+
+    const token = await signSession(
+      { sub: user.id, email: user.email, name: user.name },
+      60 * 60 * 24 * 7 // 7 días
+    );
+
+    await setSessionCookie(token, 60 * 60 * 24 * 7);
+
+    return NextResponse.json(
+      {
+        ok: true,
+        user: { id: user.id, email: user.email, name: user.name },
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error("[LOGIN] Error:", err);
+    return NextResponse.json({ error: err?.message || "Error interno" }, { status: 500 });
   }
 }

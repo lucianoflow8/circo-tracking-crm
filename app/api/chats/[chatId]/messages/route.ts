@@ -27,6 +27,16 @@ function pickExternalLineId(row: any) {
   return (row?.external_line_id as string) || (row?.id as string) || null;
 }
 
+async function ensureConnected(lineId: string, ownerId: string) {
+  try {
+    await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerId }),
+    }).catch(() => null);
+  } catch {}
+}
+
 /**
  * Devuelve una lineId (external_line_id) válida para el usuario.
  * - Si viene desiredLineId: valida que sea del user (por external_line_id o id)
@@ -115,21 +125,29 @@ export async function GET(
     } catch {}
 
     const resolved = await resolveUserLineId({ userId, desiredLineId, lastMsgLineId });
-    if (!resolved.ok) {
-      return NextResponse.json({ error: resolved.error }, { status: 403 });
-    }
+    if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 403 });
 
     const lineId = resolved.lineId;
 
     const [waMessagesRaw, dbRows] = await Promise.all([
       (async () => {
         try {
-          const waRes = await fetch(
-            `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(
-              jid
-            )}/messages`,
+          let waRes = await fetch(
+            `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
             { cache: "no-store" }
           );
+
+          // Session not found => autoconnect y retry 1 vez
+          if (!waRes.ok) {
+            const text = await waRes.text().catch(() => "");
+            if (waRes.status === 404 && text.includes("Session not found")) {
+              await ensureConnected(lineId, userId);
+              waRes = await fetch(
+                `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+                { cache: "no-store" }
+              );
+            }
+          }
 
           if (!waRes.ok) {
             const text = await waRes.text();
@@ -158,21 +176,18 @@ export async function GET(
       })(),
     ]);
 
-    const dbMessages = dbRows.map((row) => {
-      const id = row.waMessageId || row.id;
-      return {
-        id,
-        fromMe: row.direction === "out",
-        body: row.body || "",
-        timestamp: row.createdAt.toISOString(),
-        status: row.direction === "out" ? ("sent" as const) : undefined,
-        type: (row.msgType as any) || "text",
-        media: null,
-        senderName: undefined,
-        senderNumber: row.phone,
-        senderAvatar: null,
-      };
-    });
+    const dbMessages = dbRows.map((row) => ({
+      id: row.waMessageId || row.id,
+      fromMe: row.direction === "out",
+      body: row.body || "",
+      timestamp: row.createdAt.toISOString(),
+      status: row.direction === "out" ? ("sent" as const) : undefined,
+      type: (row.msgType as any) || "text",
+      media: null,
+      senderName: undefined,
+      senderNumber: row.phone,
+      senderAvatar: null,
+    }));
 
     if (!waMessagesRaw.length && !dbMessages.length) {
       return NextResponse.json({ messages: [] }, { status: 200 });
@@ -199,12 +214,7 @@ export async function GET(
           ? new Date(wm.timestamp).toISOString()
           : prev.timestamp || new Date().toISOString();
 
-      byId.set(id, {
-        ...prev,
-        ...wm,
-        id,
-        timestamp: tsIso,
-      });
+      byId.set(id, { ...prev, ...wm, id, timestamp: tsIso });
     }
 
     const merged = Array.from(byId.values()).sort(
@@ -261,9 +271,7 @@ export async function POST(
     } catch {}
 
     const resolved = await resolveUserLineId({ userId, desiredLineId, lastMsgLineId });
-    if (!resolved.ok) {
-      return NextResponse.json({ error: resolved.error }, { status: 403 });
-    }
+    if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 403 });
 
     const lineId = resolved.lineId;
 
@@ -276,16 +284,30 @@ export async function POST(
       else msgType = "media";
     }
 
-    const waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(
-        jid
-      )}/messages`,
+    let waRes = await fetch(
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body, media, type: msgType }),
       }
     );
+
+    // Session not found => autoconnect y retry 1 vez
+    if (!waRes.ok) {
+      const text = await waRes.text().catch(() => "");
+      if (waRes.status === 404 && text.includes("Session not found")) {
+        await ensureConnected(lineId, userId);
+        waRes = await fetch(
+          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ body, media, type: msgType }),
+          }
+        );
+      }
+    }
 
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
@@ -308,7 +330,7 @@ export async function POST(
       update: {
         phone,
         ownerId: userId,
-        lineId, // <- guardamos SIEMPRE la external lineId que estamos usando
+        lineId,
         direction: "out",
         body,
         msgType,
@@ -342,9 +364,7 @@ export async function POST(
     return NextResponse.json({ message: saved }, { status: 200 });
   } catch (err: any) {
     console.error("[MESSAGES POST] Error interno:", err);
-    return NextResponse.json(
-      { error: err?.message || "Error interno al enviar mensaje" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Error interno al enviar mensaje" }, { status: 500 });
   }
 }
+
