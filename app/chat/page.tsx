@@ -1,3 +1,4 @@
+// app/chat/page.tsx
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -19,6 +20,9 @@ interface ChatSummary {
 
   // número del contacto (solo dígitos o con +)
   phone?: string | null;
+
+  // ✅ NUEVO: a qué línea pertenece este chat (viene de /api/chats)
+  lineId?: string | null;
 
   [key: string]: any;
 }
@@ -47,9 +51,7 @@ interface Message {
 }
 
 // helper avatar
-const getAvatarFromChat = (
-  chat: ChatSummary | null | undefined
-): string | null => {
+const getAvatarFromChat = (chat: ChatSummary | null | undefined): string | null => {
   if (!chat) return null;
   if (chat.avatarUrl) return chat.avatarUrl;
   if (chat.profilePicUrl) return chat.profilePicUrl;
@@ -135,7 +137,6 @@ const formatMessageBody = (msg: Message): string => {
   return body;
 };
 
-
 const formatPhone = (raw: string | null): string | null => {
   if (!raw) return null;
   if (raw.startsWith("+")) return raw;
@@ -179,10 +180,16 @@ const getChatDisplayName = (chat: ChatSummary | null | undefined): string => {
 
 type ChatFilter = "all" | "unread" | "groups";
 
+// ✅ helper: arma ?lineId=... para cada chat (para NO mezclar cuentas/líneas)
+const getLineIdQuery = (chat: ChatSummary | null | undefined) => {
+  const lineId = chat?.lineId ? String(chat.lineId).trim() : "";
+  return lineId ? `?lineId=${encodeURIComponent(lineId)}` : "";
+};
+
 export default function ChatPage() {
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
-  const firstChatsLoadRef = useRef(true); // 👈 NUEVO, acá arriba
+  const firstChatsLoadRef = useRef(true);
 
   const handleMessagesScroll = () => {
     const el = messagesContainerRef.current;
@@ -233,11 +240,8 @@ export default function ChatPage() {
   const [groupName, setGroupName] = useState("");
   const [groupDescription, setGroupDescription] = useState("");
   const [groupSearch, setGroupSearch] = useState("");
-  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>(
-    []
-  );
-  const [groupMessagesAdminsOnly, setGroupMessagesAdminsOnly] =
-    useState(false); // false = todos hablan
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
+  const [groupMessagesAdminsOnly, setGroupMessagesAdminsOnly] = useState(false); // false = todos hablan
   const [groupAdminIds, setGroupAdminIds] = useState<string[]>([]);
   const [creatingGroup, setCreatingGroup] = useState(false);
 
@@ -263,10 +267,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
-        "flowcirco_last_seen",
-        JSON.stringify(chatLastSeen)
-      );
+      window.localStorage.setItem("flowcirco_last_seen", JSON.stringify(chatLastSeen));
     } catch {
       // ignore
     }
@@ -314,8 +315,6 @@ export default function ChatPage() {
 
         const data = await res.json();
 
-        console.log("CHATS DESDE API:", data.chats);
-
         const raw: ChatSummary[] = data.chats || [];
 
         // aplicamos lógica de "leído" usando lastSeen + lastMessageAt
@@ -331,8 +330,13 @@ export default function ChatPage() {
         });
 
         setChats(normalized);
+
         if (!activeChat && normalized.length) {
           setActiveChat(normalized[0]);
+        } else if (activeChat && normalized.length) {
+          // si el chat activo sigue existiendo, lo refrescamos (incluye lineId)
+          const updated = normalized.find((c) => c.id === activeChat.id);
+          if (updated) setActiveChat(updated);
         }
       } catch (err: any) {
         console.error("Error fetchChats:", err);
@@ -349,7 +353,7 @@ export default function ChatPage() {
     fetchChats();
     const interval = setInterval(fetchChats, 15000);
     return () => clearInterval(interval);
-  }, [chatLastSeen, activeChat?.id]); // 👈 mejor dependemos del id
+  }, [chatLastSeen, activeChat?.id]);
   // ===============================================================
 
   // ========= cargar mensajes =========
@@ -366,8 +370,10 @@ export default function ChatPage() {
         }
         setError(null);
 
+        const lineQ = getLineIdQuery(activeChat);
+
         const res = await fetch(
-          `/api/chats/${encodeURIComponent(activeChat.id)}/messages`,
+          `/api/chats/${encodeURIComponent(activeChat.id)}/messages${lineQ}`,
           { cache: "no-store" }
         );
         if (!res.ok) throw new Error("Error al cargar mensajes");
@@ -405,8 +411,7 @@ export default function ChatPage() {
 
           const merged = Array.from(byId.values()).sort(
             (a, b) =>
-              new Date(a.timestamp).getTime() -
-              new Date(b.timestamp).getTime()
+              new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
           );
 
           return merged;
@@ -526,8 +531,10 @@ export default function ChatPage() {
       setSending(true);
       setError(null);
 
+      const lineQ = getLineIdQuery(activeChat);
+
       const res = await fetch(
-        `/api/chats/${encodeURIComponent(activeChat.id)}/messages`,
+        `/api/chats/${encodeURIComponent(activeChat.id)}/messages${lineQ}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -537,11 +544,7 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const text = await res.text();
-        console.error(
-          "Error backend /api/chats/[chatId]/messages:",
-          res.status,
-          text
-        );
+        console.error("Error backend /api/chats/[chatId]/messages:", res.status, text);
         throw new Error("Error al enviar mensaje");
       }
 
@@ -549,20 +552,12 @@ export default function ChatPage() {
       const saved: Message | undefined = data.message;
 
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId
-            ? saved ?? { ...optimistic, status: "sent" }
-            : m
-        )
+        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
       );
     } catch (err: any) {
       console.error(err);
       setError(err.message ?? "Error al enviar mensaje");
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId ? { ...m, status: "pending" } : m
-        )
-      );
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m)));
     } finally {
       setSending(false);
     }
@@ -577,8 +572,7 @@ export default function ChatPage() {
     const mt = media.mimetype || "";
     if (mt.startsWith("image/")) msgType = "image";
     else if (mt.startsWith("audio/")) msgType = "audio";
-    else if (mt === "application/pdf" || mt.startsWith("application/"))
-      msgType = "document";
+    else if (mt === "application/pdf" || mt.startsWith("application/")) msgType = "document";
 
     const optimistic: Message = {
       id: tempId,
@@ -598,8 +592,10 @@ export default function ChatPage() {
       setUploading(true);
       setError(null);
 
+      const lineQ = getLineIdQuery(activeChat);
+
       const res = await fetch(
-        `/api/chats/${encodeURIComponent(activeChat.id)}/messages`,
+        `/api/chats/${encodeURIComponent(activeChat.id)}/messages${lineQ}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -624,20 +620,12 @@ export default function ChatPage() {
       const saved: Message | undefined = data.message;
 
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId
-            ? saved ?? { ...optimistic, status: "sent" }
-            : m
-        )
+        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
       );
     } catch (err: any) {
       console.error(err);
       setError(err.message ?? "Error al enviar archivo");
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId ? { ...m, status: "pending" } : m
-        )
-      );
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m)));
     } finally {
       setUploading(false);
     }
@@ -663,19 +651,13 @@ export default function ChatPage() {
   const saveEditedName = () => {
     if (!activeChat) return;
     const newName = editingName.trim() || activeChat.name;
-    setActiveChat((prev) =>
-      prev && prev.id === activeChat.id ? { ...prev, name: newName } : prev
-    );
-    setChats((prev) =>
-      prev.map((c) => (c.id === activeChat.id ? { ...c, name: newName } : c))
-    );
+    setActiveChat((prev) => (prev && prev.id === activeChat.id ? { ...prev, name: newName } : prev));
+    setChats((prev) => prev.map((c) => (c.id === activeChat.id ? { ...c, name: newName } : c)));
   };
 
   // teléfono activo: solo en individuales
   const activePhoneRaw =
-    activeChat && !isGroupChat(activeChat)
-      ? (activeChat.phone as string | null) ?? null
-      : null;
+    activeChat && !isGroupChat(activeChat) ? (activeChat.phone as string | null) ?? null : null;
   const activePhoneFormatted = formatPhone(activePhoneRaw);
 
   const handleCopyPhone = async () => {
@@ -692,10 +674,7 @@ export default function ChatPage() {
   const groupMembers =
     isGroupChat(activeChat) && messages.length
       ? (() => {
-          const map = new Map<
-            string,
-            { number: string | null; name: string | null; avatar?: string | null }
-          >();
+          const map = new Map<string, { number: string | null; name: string | null; avatar?: string | null }>();
 
           for (const m of messages) {
             if (m.fromMe) continue;
@@ -732,19 +711,13 @@ export default function ChatPage() {
       [chat.id]: nowIso,
     }));
 
-    setChats((prev) =>
-      prev.map((c) => (c.id === chat.id ? { ...c, unreadCount: 0 } : c))
-    );
+    setChats((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unreadCount: 0 } : c)));
   };
 
   // aplicar filtro + búsqueda a la lista de chats
   const filteredChats = chats.filter((chat) => {
-    if (chatFilter === "unread" && (chat.unreadCount || 0) <= 0) {
-      return false;
-    }
-    if (chatFilter === "groups" && !isGroupChat(chat)) {
-      return false;
-    }
+    if (chatFilter === "unread" && (chat.unreadCount || 0) <= 0) return false;
+    if (chatFilter === "groups" && !isGroupChat(chat)) return false;
 
     const term = searchTerm.trim().toLowerCase();
     if (!term) return true;
@@ -803,9 +776,7 @@ export default function ChatPage() {
     setSelectedParticipantIds((prev) => {
       if (prev.includes(chatId)) {
         // si lo saco como participante, también lo saco de admins
-        setGroupAdminIds((prevAdmins) =>
-          prevAdmins.filter((id) => id !== chatId)
-        );
+        setGroupAdminIds((prevAdmins) => prevAdmins.filter((id) => id !== chatId));
         return prev.filter((id) => id !== chatId);
       }
       return [...prev, chatId];
@@ -818,9 +789,7 @@ export default function ChatPage() {
         return prev.filter((id) => id !== chatId);
       } else {
         // si lo marco como admin y no estaba como participante, lo agrego
-        setSelectedParticipantIds((prevSel) =>
-          prevSel.includes(chatId) ? prevSel : [...prevSel, chatId]
-        );
+        setSelectedParticipantIds((prevSel) => (prevSel.includes(chatId) ? prevSel : [...prevSel, chatId]));
         return [...prev, chatId];
       }
     });
@@ -928,10 +897,7 @@ export default function ChatPage() {
           }
         }
       } catch (e) {
-        console.log(
-          "No se pudo refrescar lista de chats después de crear grupo",
-          e
-        );
+        console.log("No se pudo refrescar lista de chats después de crear grupo", e);
       }
     } catch (err: any) {
       console.error(err);
@@ -963,9 +929,7 @@ export default function ChatPage() {
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40">
           <div className="w-full max-w-lg rounded-lg bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-[#e2e8f0] px-4 py-3">
-              <h2 className="text-sm font-semibold text-[#111827]">
-                Crear grupo
-              </h2>
+              <h2 className="text-sm font-semibold text-[#111827]">Crear grupo</h2>
               <button
                 className="text-xl leading-none text-[#94a3b8] hover:text-[#111827]"
                 onClick={() => {
@@ -1020,9 +984,7 @@ export default function ChatPage() {
               </div>
 
               <div>
-                <label className="text-xs font-medium text-[#64748b]">
-                  Nombre del grupo
-                </label>
+                <label className="text-xs font-medium text-[#64748b]">Nombre del grupo</label>
                 <input
                   className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm outline-none focus:border-[#22c55e]"
                   placeholder="Ej: Clientes VIP, Equipo Ventas..."
@@ -1032,9 +994,7 @@ export default function ChatPage() {
               </div>
 
               <div>
-                <label className="text-xs font-medium text-[#64748b]">
-                  Descripción (opcional)
-                </label>
+                <label className="text-xs font-medium text-[#64748b]">Descripción (opcional)</label>
                 <textarea
                   className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2 text-xs outline-none focus:border-[#22c55e] min-h-[60px] resize-none"
                   placeholder="Reglas, info del grupo, etc."
@@ -1057,16 +1017,12 @@ export default function ChatPage() {
 
               <div className="max-h-56 overflow-y-auto rounded-lg border border-[#e2e8f0]">
                 {filteredCandidates.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-[#94a3b8]">
-                    No se encontraron chats.
-                  </div>
+                  <div className="px-3 py-2 text-xs text-[#94a3b8]">No se encontraron chats.</div>
                 )}
 
                 {filteredCandidates.map((chat) => {
                   const avatarSrc = getAvatarFromChat(chat);
-                  const phone = formatPhone(
-                    (chat.phone as string | null) ?? null
-                  );
+                  const phone = formatPhone((chat.phone as string | null) ?? null);
                   const isSelected = selectedParticipantIds.includes(chat.id);
                   const isAdmin = groupAdminIds.includes(chat.id);
 
@@ -1097,14 +1053,8 @@ export default function ChatPage() {
                             )}
                           </div>
                           <div className="flex flex-col">
-                            <span className="font-medium text-[#111827]">
-                              {chat.name}
-                            </span>
-                            {phone && (
-                              <span className="text-[11px] text-[#94a3b8]">
-                                {phone}
-                              </span>
-                            )}
+                            <span className="font-medium text-[#111827]">{chat.name}</span>
+                            {phone && <span className="text-[11px] text-[#94a3b8]">{phone}</span>}
                           </div>
                         </div>
                       </div>
@@ -1126,9 +1076,7 @@ export default function ChatPage() {
               </div>
 
               <div className="mt-2 border-t border-[#e2e8f0] pt-2">
-                <p className="text-xs font-medium text-[#64748b] mb-1">
-                  Permisos de mensajes
-                </p>
+                <p className="text-xs font-medium text-[#64748b] mb-1">Permisos de mensajes</p>
                 <div className="flex flex-col gap-1 text-xs text-[#111827]">
                   <label className="flex items-center gap-2">
                     <input
@@ -1183,9 +1131,7 @@ export default function ChatPage() {
               F
             </div>
             <div>
-              <p className="text-sm font-semibold text-[#111827]">
-                Flow Circo CRM
-              </p>
+              <p className="text-sm font-semibold text-[#111827]">Flow Circo CRM</p>
               <p className="text-xs text-[#64748b]">Conectado</p>
             </div>
           </div>
@@ -1199,7 +1145,7 @@ export default function ChatPage() {
           </button>
         </header>
 
-        <div className="px-3 py-2 bg_white">
+        <div className="px-3 py-2">
           <input
             className="w-full rounded-full bg-[#f0f2f5] border border-[#e2e8f0] px-3 py-2 text-sm text-[#111827] placeholder:text-[#9ca3af] outline-none"
             placeholder="Buscar chat"
@@ -1247,9 +1193,7 @@ export default function ChatPage() {
 
         <div className="flex-1 overflow-y-auto bg-white">
           {loadingChats && (
-            <div className="px-3 py-2 text-xs text-[#64748b]">
-              Cargando chats…
-            </div>
+            <div className="px-3 py-2 text-xs text-[#64748b]">Cargando chats…</div>
           )}
 
           {filteredChats.map((chat) => {
@@ -1294,9 +1238,7 @@ export default function ChatPage() {
                               : "text-[#64748b]"
                           }`}
                         >
-                          {getStatusIcon(
-                            chat.lastMessageStatus as MessageStatus
-                          )}
+                          {getStatusIcon(chat.lastMessageStatus as MessageStatus)}
                         </span>
                       )}
                       <span className="truncate">{chat.lastMessage}</span>
@@ -1318,9 +1260,7 @@ export default function ChatPage() {
           })}
 
           {!loadingChats && !filteredChats.length && (
-            <div className="px-3 py-4 text-xs text-[#64748b]">
-              No hay chats todavía.
-            </div>
+            <div className="px-3 py-4 text-xs text-[#64748b]">No hay chats todavía.</div>
           )}
         </div>
       </aside>
@@ -1331,9 +1271,7 @@ export default function ChatPage() {
         <header className="flex items-center justify-between px-4 py-3 bg-[#f0f2f5] border-l border-[#e2e8f0]">
           <div
             className="flex items-center gap-3 cursor-pointer"
-            onClick={() =>
-              activeChat && setShowContactPanel((prev) => !prev)
-            }
+            onClick={() => activeChat && setShowContactPanel((prev) => !prev)}
           >
             <div className="h-8 w-8 rounded-full bg-[#d4f4e2] flex items-center justify-center overflow-hidden">
               {(() => {
@@ -1359,9 +1297,7 @@ export default function ChatPage() {
               <p className="text-sm font-semibold text-[#111827]">
                 {getChatDisplayName(activeChat)}
               </p>
-              <p className="text-xs text-[#64748b]">
-                {activeChat ? "en línea" : ""}
-              </p>
+              <p className="text-xs text-[#64748b]">{activeChat ? "en línea" : ""}</p>
             </div>
           </div>
 
@@ -1427,11 +1363,7 @@ export default function ChatPage() {
                     >
                       📋 Copiar
                     </button>
-                    {copiedPhone && (
-                      <span className="text-[10px] text-[#22c55e]">
-                        Copiado
-                      </span>
-                    )}
+                    {copiedPhone && <span className="text-[10px] text-[#22c55e]">Copiado</span>}
                   </div>
                 )}
               </div>
@@ -1445,9 +1377,7 @@ export default function ChatPage() {
                 <div className="flex flex-wrap gap-2">
                   {groupMembers.map((m, idx) => {
                     const displayName = m.name || m.number || "Desconocido";
-                    const displayPhone = m.number
-                      ? formatPhone(m.number)
-                      : null;
+                    const displayPhone = m.number ? formatPhone(m.number) : null;
                     const initial = (displayName || "?")[0];
 
                     return (
@@ -1467,14 +1397,8 @@ export default function ChatPage() {
                           )}
                         </div>
                         <div className="text-[11px] leading-tight text-[#111827] max-w-[140px]">
-                          <div className="font-medium truncate">
-                            {displayName}
-                          </div>
-                          {displayPhone && (
-                            <div className="text-[#64748b]">
-                              {displayPhone}
-                            </div>
-                          )}
+                          <div className="font-medium truncate">{displayName}</div>
+                          {displayPhone && <div className="text-[#64748b]">{displayPhone}</div>}
                         </div>
                       </div>
                     );
@@ -1519,17 +1443,14 @@ export default function ChatPage() {
                 .join("");
 
               const senderInitial =
-                msg.senderName?.[0] ||
-                (digitsOnly ? digitsOnly.slice(-2) : "?");
+                msg.senderName?.[0] || (digitsOnly ? digitsOnly.slice(-2) : "?");
 
               const renderedBody = formatMessageBody(msg);
 
               return (
                 <div
                   key={msg.id}
-                  className={`flex w-full ${
-                    isMine ? "justify-end" : "justify-start"
-                  }`}
+                  className={`flex w-full ${isMine ? "justify-end" : "justify-start"}`}
                 >
                   {!isMine && (
                     <div className="mr-2 flex items-end">
@@ -1578,22 +1499,14 @@ export default function ChatPage() {
                         className="mb-1 flex items-center gap-2 rounded-md border border-[#e2e8f0] bg-[#f9fafb] px-2 py-1 text-xs hover:bg-[#eef2ff]"
                       >
                         <span>📄</span>
-                        <span className="truncate">
-                          {msg.media.fileName || "Documento"}
-                        </span>
-                        <span className="ml-auto text-[10px] text-[#64748b]">
-                          Descargar
-                        </span>
+                        <span className="truncate">{msg.media.fileName || "Documento"}</span>
+                        <span className="ml-auto text-[10px] text-[#64748b]">Descargar</span>
                       </a>
                     )}
 
                     {msg.media && msg.type === "audio" && (
                       <div className="mb-1">
-                        <audio
-                          controls
-                          src={msg.media.dataUrl}
-                          className="w-56 sm:w-64"
-                        />
+                        <audio controls src={msg.media.dataUrl} className="w-56 sm:w-64" />
                       </div>
                     )}
 
@@ -1608,19 +1521,13 @@ export default function ChatPage() {
                           className="mb-1 flex items-center gap-2 rounded-md border border-[#e2e8f0] bg-[#f9fafb] px-2 py-1 text-xs hover:bg-[#eef2ff]"
                         >
                           <span>📎</span>
-                          <span className="truncate">
-                            {msg.media.fileName || "Archivo adjunto"}
-                          </span>
-                          <span className="ml-auto text-[10px] text-[#64748b]">
-                            Descargar
-                          </span>
+                          <span className="truncate">{msg.media.fileName || "Archivo adjunto"}</span>
+                          <span className="ml-auto text-[10px] text-[#64748b]">Descargar</span>
                         </a>
                       )}
 
                     {renderedBody.trim() && (
-                      <span className="whitespace-pre-wrap break-words">
-                        {renderedBody}
-                      </span>
+                      <span className="whitespace-pre-wrap break-words">{renderedBody}</span>
                     )}
 
                     <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-[#64748b]">
@@ -1628,9 +1535,7 @@ export default function ChatPage() {
                       {isMine && msg.status && (
                         <span
                           className={`ml-1 text-[11px] ${
-                            msg.status === "read"
-                              ? "text-[#0ea5e9]"
-                              : "text-[#64748b]"
+                            msg.status === "read" ? "text-[#0ea5e9]" : "text-[#64748b]"
                           }`}
                         >
                           {getStatusIcon(msg.status)}
@@ -1691,9 +1596,7 @@ export default function ChatPage() {
           {pendingMedia && (
             <div className="absolute left-16 bottom-12 text-xs text-[#64748b] bg-white border border-[#e2e8f0] rounded px-2 py-1 shadow-sm max-w-xs truncate">
               Archivo listo para enviar:{" "}
-              <span className="font-medium">
-                {pendingMedia.fileName || "archivo"}
-              </span>
+              <span className="font-medium">{pendingMedia.fileName || "archivo"}</span>
             </div>
           )}
 
@@ -1713,12 +1616,7 @@ export default function ChatPage() {
             📎
           </button>
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            onChange={handleFileChange}
-          />
+          <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange} />
 
           <div className="flex-1">
             <textarea
@@ -1739,12 +1637,7 @@ export default function ChatPage() {
           <button
             type="button"
             onClick={handleSend}
-            disabled={
-              (!input.trim() && !pendingMedia) ||
-              sending ||
-              uploading ||
-              !activeChat
-            }
+            disabled={(!input.trim() && !pendingMedia) || sending || uploading || !activeChat}
             className="flex h-10 w-10 items-center justify-center rounded-full bg-[#00a884] text-xl text-white disabled:opacity-60"
           >
             ➤

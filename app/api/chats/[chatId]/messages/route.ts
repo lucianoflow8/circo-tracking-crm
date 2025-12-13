@@ -2,9 +2,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUserId } from "@/lib/auth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const WA_SERVER_URL = process.env.WA_SERVER_URL!;
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
+const WA_SERVER_URL = process.env.WA_SERVER_URL || "";
 
 // Helper params (soporta objeto o Promise)
 async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
@@ -22,15 +22,11 @@ const toDigits = (value: string | null | undefined) =>
 function resolvePhoneAndJid(rawChatId: string) {
   const trimmed = (rawChatId || "").trim();
 
-  // Para DB siempre solo dígitos (sirve igual venga “54911...” o “54911...@c.us”)
   const phone = toDigits(trimmed);
 
-  // Para WA-SERVER:
-  // - Si YA viene con @c.us o @g.us -> lo usamos tal cual
-  // - Si NO, asumimos que es un número y le agregamos @c.us
   let jid: string;
   if (trimmed.includes("@")) {
-    jid = trimmed; // ej: "54911....@c.us" o "xxx-yyy@g.us"
+    jid = trimmed;
   } else {
     jid = `${phone}@c.us`;
   }
@@ -38,9 +34,56 @@ function resolvePhoneAndJid(rawChatId: string) {
   return { phone, jid };
 }
 
+async function ensureLineOwnedByUser(userId: string, lineId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("wa_lines")
+    .select("id, external_line_id, owner_id, status")
+    .eq("owner_id", userId)
+    .or(`external_line_id.eq.${lineId},id.eq.${lineId}`)
+    .maybeSingle();
+
+  if (error) return null;
+  if (!data) return null;
+
+  // usamos SIEMPRE external_line_id si existe
+  return (data as any).external_line_id || (data as any).id || null;
+}
+
+async function pickAnyConnectedLineForUser(userId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("wa_lines")
+    .select("id, external_line_id, status, last_assigned_at")
+    .eq("owner_id", userId)
+    .in("status", ["connected", "CONNECTED"]);
+
+  if (error) return null;
+  const lines = (data || []).filter(Boolean);
+  if (!lines.length) return null;
+
+  // elegimos la menos recientemente asignada (balance)
+  const sorted = [...lines].sort((a: any, b: any) => {
+    const aTime = a.last_assigned_at ? new Date(a.last_assigned_at).getTime() : 0;
+    const bTime = b.last_assigned_at ? new Date(b.last_assigned_at).getTime() : 0;
+    return aTime - bTime;
+  });
+
+  const chosen: any = sorted[0];
+  const external = chosen.external_line_id || chosen.id || null;
+
+  // marcamos last_assigned_at (no es obligatorio, pero ayuda)
+  try {
+    await supabaseAdmin
+      .from("wa_lines")
+      .update({ last_assigned_at: new Date().toISOString() })
+      .eq("id", chosen.id);
+  } catch {}
+
+  return external;
+}
+
 // ========= GET: combina mensajes de WA-SERVER + CrmMessage =========
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
 ) {
   const { chatId } = await unwrapParams(context.params);
@@ -55,24 +98,55 @@ export async function GET(
     return NextResponse.json({ error: "No autenticado" }, { status: 401 });
   }
 
-  // ==== Resolvemos la línea a usar ====
-  let lineId = DEFAULT_LINE_ID;
-  try {
-    const lastMsg = await prisma.crmMessage.findFirst({
-      where: {
-        phone,
-        ownerId: userId,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-    if (lastMsg?.lineId) {
-      lineId = lastMsg.lineId;
+  if (!WA_SERVER_URL) {
+    return NextResponse.json(
+      { error: "WA_SERVER_URL no configurado" },
+      { status: 500 }
+    );
+  }
+
+  // 1) lineId (override) viene del front si el chat venía de /api/chats
+  const url = new URL(req.url);
+  const lineIdFromQuery = url.searchParams.get("lineId")?.trim() || null;
+
+  // 2) Resolver línea a usar:
+  // - si vino lineId => validar que es del user
+  // - si no vino => usar última lineId usada en CrmMessage (si existe)
+  // - si no hay => elegir cualquier conectada del user
+  let lineId: string | null = null;
+
+  if (lineIdFromQuery) {
+    lineId = await ensureLineOwnedByUser(userId, lineIdFromQuery);
+    if (!lineId) {
+      return NextResponse.json(
+        { error: "Esa línea no pertenece al usuario" },
+        { status: 403 }
+      );
     }
-  } catch (err) {
-    console.error(
-      "[API/CHAT MESSAGES GET] Error buscando línea para phone",
-      phone,
-      err
+  } else {
+    try {
+      const lastMsg = await prisma.crmMessage.findFirst({
+        where: { phone, ownerId: userId },
+        orderBy: { createdAt: "desc" },
+      });
+      if (lastMsg?.lineId) {
+        // validar ownership por seguridad
+        const ok = await ensureLineOwnedByUser(userId, lastMsg.lineId);
+        if (ok) lineId = ok;
+      }
+    } catch (err) {
+      console.error("[API/CHAT MESSAGES GET] Error buscando lastMsg:", err);
+    }
+
+    if (!lineId) {
+      lineId = await pickAnyConnectedLineForUser(userId);
+    }
+  }
+
+  if (!lineId) {
+    return NextResponse.json(
+      { messages: [], info: "No tenés líneas conectadas para leer mensajes." },
+      { status: 200 }
     );
   }
 
@@ -83,7 +157,8 @@ export async function GET(
         const waRes = await fetch(
           `${WA_SERVER_URL}/lines/${encodeURIComponent(
             lineId
-          )}/chats/${encodeURIComponent(jid)}/messages`
+          )}/chats/${encodeURIComponent(jid)}/messages`,
+          { cache: "no-store" }
         );
 
         if (!waRes.ok) {
@@ -100,33 +175,23 @@ export async function GET(
         const arr = (waData?.messages ?? []) as any[];
         return Array.isArray(arr) ? arr : [];
       } catch (err) {
-        console.error(
-          "[API/CHAT MESSAGES GET] Error llamando a WA-SERVER",
-          err
-        );
+        console.error("[API/CHAT MESSAGES GET] Error WA-SERVER", err);
         return [] as any[];
       }
     })(),
     (async () => {
       try {
         return await prisma.crmMessage.findMany({
-          where: {
-            phone,
-            ownerId: userId,
-          },
+          where: { phone, ownerId: userId },
           orderBy: { createdAt: "asc" },
         });
       } catch (err) {
-        console.error(
-          "[API/CHAT MESSAGES GET] Error leyendo CrmMessage (fallback)",
-          err
-        );
+        console.error("[API/CHAT MESSAGES GET] Error leyendo CrmMessage", err);
         return [];
       }
     })(),
   ]);
 
-  // Normalizamos los mensajes de Prisma al mismo formato que usamos en el front
   const dbMessages = dbRows.map((row) => {
     const id = row.waMessageId || row.id;
     return {
@@ -143,21 +208,17 @@ export async function GET(
     };
   });
 
-  // Si no hay nada de ninguno, devolvemos vacío
   if (!waMessagesRaw.length && !dbMessages.length) {
     return NextResponse.json({ messages: [] }, { status: 200 });
   }
 
-  // ==== Merge WA + DB por id, dando prioridad a WA para status/type/timestamp ====
   const byId = new Map<string, any>();
 
-  // Primero metemos lo que viene de DB
   for (const m of dbMessages) {
     if (!m.id) continue;
     byId.set(String(m.id), { ...m });
   }
 
-  // Ahora pisamos/completamos con lo de WA-SERVER
   for (const wm of waMessagesRaw) {
     const rawId = wm?.id || wm?.waMessageId || wm?.key?.id;
     if (!rawId) continue;
@@ -180,10 +241,8 @@ export async function GET(
     });
   }
 
-  // A array + orden cronológico ascendente
   const merged = Array.from(byId.values()).sort(
-    (a, b) =>
-      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
   return NextResponse.json({ messages: merged }, { status: 200 });
@@ -204,7 +263,6 @@ export async function POST(
 
     const body = rawBody.trim();
 
-    // Permitimos body vacío si hay media
     if (!body && !media) {
       return NextResponse.json(
         { error: "Se requiere body (texto) o media" },
@@ -215,42 +273,60 @@ export async function POST(
     const { phone, jid } = resolvePhoneAndJid(chatId);
 
     if (!phone) {
-      return NextResponse.json(
-        { error: "chatId inválido" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
     }
 
     const userId = await getCurrentUserId();
     if (!userId) {
+      return NextResponse.json({ error: "No autenticado" }, { status: 401 });
+    }
+
+    if (!WA_SERVER_URL) {
       return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
+        { error: "WA_SERVER_URL no configurado" },
+        { status: 500 }
       );
     }
 
-    // Línea a usar: última usada con ese teléfono o la default
-    let lineId = DEFAULT_LINE_ID;
-    try {
-      const lastMsg = await prisma.crmMessage.findFirst({
-        where: {
-          phone,
-          ownerId: userId,
-        },
-        orderBy: { createdAt: "desc" },
-      });
-      if (lastMsg?.lineId) {
-        lineId = lastMsg.lineId;
+    const url = new URL(req.url);
+    const lineIdFromQuery = url.searchParams.get("lineId")?.trim() || null;
+
+    let lineId: string | null = null;
+
+    if (lineIdFromQuery) {
+      lineId = await ensureLineOwnedByUser(userId, lineIdFromQuery);
+      if (!lineId) {
+        return NextResponse.json(
+          { error: "Esa línea no pertenece al usuario" },
+          { status: 403 }
+        );
       }
-    } catch (err) {
-      console.error(
-        "[API/CHAT MESSAGES POST] Error buscando línea para phone",
-        phone,
-        err
+    } else {
+      // fallback: última línea usada con ese phone (si existe y es tuya)
+      try {
+        const lastMsg = await prisma.crmMessage.findFirst({
+          where: { phone, ownerId: userId },
+          orderBy: { createdAt: "desc" },
+        });
+
+        if (lastMsg?.lineId) {
+          const ok = await ensureLineOwnedByUser(userId, lastMsg.lineId);
+          if (ok) lineId = ok;
+        }
+      } catch {}
+
+      if (!lineId) {
+        lineId = await pickAnyConnectedLineForUser(userId);
+      }
+    }
+
+    if (!lineId) {
+      return NextResponse.json(
+        { error: "No tenés líneas conectadas para enviar mensajes." },
+        { status: 400 }
       );
     }
 
-    // 1) Tipo de mensaje (lo usamos para WA y para la DB)
     let msgType: string = "text";
     if (media) {
       const mt = media.mimetype || "";
@@ -263,7 +339,6 @@ export async function POST(
       msgType = "text";
     }
 
-    // 2) Enviar al WA-SERVER
     const waRes = await fetch(
       `${WA_SERVER_URL}/lines/${encodeURIComponent(
         lineId
@@ -271,21 +346,13 @@ export async function POST(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          body,
-          media,
-          type: msgType, // <- IMPORTANTe para que el wa-server sepa si es image/audio/doc/text
-        }),
+        body: JSON.stringify({ body, media, type: msgType }),
       }
     );
 
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
-      console.error(
-        "WA-SERVER messages POST error:",
-        waRes.status,
-        text.slice(0, 300)
-      );
+      console.error("WA-SERVER messages POST error:", waRes.status, text.slice(0, 300));
       return NextResponse.json(
         { error: "Error al enviar mensaje a WA-SERVER" },
         { status: 500 }
@@ -299,7 +366,6 @@ export async function POST(
       waData = null;
     }
 
-    // 3) ID estable de WhatsApp
     const waMessageId: string =
       (waData &&
         (waData.message?.id?.id ||
@@ -308,7 +374,6 @@ export async function POST(
           waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // 4) Guardar / actualizar en CrmMessage
     const created = await prisma.crmMessage.upsert({
       where: { waMessageId },
       update: {
@@ -332,7 +397,6 @@ export async function POST(
       },
     });
 
-    // 5) Respuesta normalizada para el front
     const saved = {
       id: created.waMessageId || created.id,
       fromMe: true,
