@@ -18,6 +18,7 @@ interface ChatSummary {
   profilePicUrl?: string;
   photoUrl?: string;
 
+  lineId?: string | null;
   phone?: string | null;
   isGroup?: boolean;
 
@@ -30,13 +31,7 @@ interface MessageMedia {
   dataUrl: string;
 }
 
-type MessageType =
-  | "text"
-  | "image"
-  | "document"
-  | "audio"
-  | "media"
-  | "unknown";
+type MessageType = "text" | "image" | "document" | "audio" | "media" | "unknown";
 
 interface Message {
   id: string;
@@ -57,9 +52,7 @@ type FilterMode = "all" | "unread" | "groups";
 
 /* ========= Helpers ========= */
 
-const getAvatarFromChat = (
-  chat: ChatSummary | null | undefined
-): string | null => {
+const getAvatarFromChat = (chat: ChatSummary | null | undefined): string | null => {
   if (!chat) return null;
   if (chat.avatarUrl) return chat.avatarUrl;
   if (chat.profilePicUrl) return chat.profilePicUrl;
@@ -146,10 +139,7 @@ const formatMessageBody = (msg: Message): string => {
     const core = body.trim();
     if (!core) {
       body = msg.senderName;
-    } else if (
-      !core.startsWith(msg.senderName + "\n") &&
-      !core.startsWith(msg.senderName + " ")
-    ) {
+    } else if (!core.startsWith(msg.senderName + "\n") && !core.startsWith(msg.senderName + " ")) {
       body = `${msg.senderName}\n${core}`;
     }
   }
@@ -179,6 +169,21 @@ const getStatusIcon = (status?: MessageStatus) => {
     default:
       return null;
   }
+};
+
+/**
+ * ✅ helper: arma query string con token + lineId (si existe)
+ * - token SIEMPRE
+ * - lineId solo si lo tenemos (evita mezclar líneas)
+ */
+const buildPortalQuery = (token: string, chat?: ChatSummary | null) => {
+  const t = (token || "").trim();
+  const lineId = chat?.lineId ? String(chat.lineId).trim() : "";
+  const params = new URLSearchParams();
+  if (t) params.set("token", t);
+  if (lineId) params.set("lineId", lineId);
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 };
 
 /* ========= Componente de chat para cajero ========= */
@@ -232,10 +237,9 @@ function AgentChat() {
         setLoadingChats(true);
         setError(null);
 
-        const res = await fetch(
-          `/api/agent-portal/chats?token=${encodeURIComponent(token)}`,
-          { cache: "no-store" }
-        );
+        const res = await fetch(`/api/agent-portal/chats?token=${encodeURIComponent(token)}`, {
+          cache: "no-store",
+        });
 
         const data = await res.json().catch(() => ({} as any));
 
@@ -251,6 +255,10 @@ function AgentChat() {
 
         if (!activeChat && raw.length) {
           setActiveChat(raw[0]);
+        } else if (activeChat && raw.length) {
+          // refrescar activeChat para que mantenga lineId actualizado
+          const updated = raw.find((c) => c.id === activeChat.id);
+          if (updated) setActiveChat(updated);
         }
       } catch (e: any) {
         console.error(e);
@@ -266,7 +274,7 @@ function AgentChat() {
     return () => clearInterval(interval);
   }, [token, activeChat?.id]);
 
-  // ====== FETCH MENSAJES ======
+  // ====== FETCH MENSAJES (✅ con token + lineId) ======
   useEffect(() => {
     if (!activeChat) return;
 
@@ -278,20 +286,17 @@ function AgentChat() {
         if (first) setLoadingMessages(true);
         setError(null);
 
+        const q = buildPortalQuery(token, activeChat);
+
         const res = await fetch(
-          `/api/agent-portal/chats/${encodeURIComponent(
-            activeChat.id
-          )}/messages`,
+          `/api/agent-portal/chats/${encodeURIComponent(activeChat.id)}/messages${q}`,
           { cache: "no-store" }
         );
 
         const data = await res.json().catch(() => ({} as any));
 
         if (!res.ok) {
-          console.error(
-            "[AgentChat] Error /agent-portal/chats/[chatId]/messages:",
-            data
-          );
+          console.error("[AgentChat] Error /agent-portal/chats/[chatId]/messages:", data);
           if (!cancelled) setError(data.error || "Error al cargar mensajes");
           return;
         }
@@ -315,23 +320,23 @@ function AgentChat() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [activeChat?.id]);
+  }, [activeChat?.id, token]);
 
   // Scroll al último mensaje
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  // seleccionar chat y limpiar badge de no leído + marcar leído en backend
+  // seleccionar chat y limpiar badge de no leído + marcar leído en backend (✅ con token + lineId)
   const handleSelectChat = (chat: ChatSummary) => {
     setActiveChat(chat);
     setMessages([]);
 
-    setChats((prev) =>
-      prev.map((c) => (c.id === chat.id ? { ...c, unreadCount: 0 } : c))
-    );
+    setChats((prev) => prev.map((c) => (c.id === chat.id ? { ...c, unreadCount: 0 } : c)));
 
-    fetch(`/api/agent-portal/chats/${encodeURIComponent(chat.id)}/read`, {
+    const q = buildPortalQuery(token, chat);
+
+    fetch(`/api/agent-portal/chats/${encodeURIComponent(chat.id)}/read${q}`, {
       method: "POST",
     }).catch(() => {});
   };
@@ -355,6 +360,7 @@ function AgentChat() {
     reader.readAsDataURL(file);
   };
 
+  // ✅ enviar texto con token + lineId
   const sendTextMessage = async (text: string) => {
     if (!activeChat || !text.trim()) return;
 
@@ -376,10 +382,10 @@ function AgentChat() {
       setSending(true);
       setError(null);
 
+      const q = buildPortalQuery(token, activeChat);
+
       const res = await fetch(
-        `/api/agent-portal/chats/${encodeURIComponent(
-          activeChat.id
-        )}/messages`,
+        `/api/agent-portal/chats/${encodeURIComponent(activeChat.id)}/messages${q}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -388,27 +394,23 @@ function AgentChat() {
       );
 
       const data = await res.json().catch(() => ({} as any));
-
       if (!res.ok) throw new Error(data.error || "Error al enviar mensaje");
 
       const saved: Message | undefined = data.message;
 
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m
-        )
+        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
       );
     } catch (e: any) {
       console.error(e);
       setError(e.message || "Error al enviar mensaje");
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m))
-      );
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m)));
     } finally {
       setSending(false);
     }
   };
 
+  // ✅ enviar media con token + lineId
   const sendMediaMessage = async (text: string, media: MessageMedia) => {
     if (!activeChat) return;
 
@@ -417,8 +419,7 @@ function AgentChat() {
     const mt = media.mimetype || "";
     if (mt.startsWith("image/")) msgType = "image";
     else if (mt.startsWith("audio/")) msgType = "audio";
-    else if (mt === "application/pdf" || mt.startsWith("application/"))
-      msgType = "document";
+    else if (mt === "application/pdf" || mt.startsWith("application/")) msgType = "document";
 
     const optimistic: Message = {
       id: tempId,
@@ -438,10 +439,10 @@ function AgentChat() {
       setUploading(true);
       setError(null);
 
+      const q = buildPortalQuery(token, activeChat);
+
       const res = await fetch(
-        `/api/agent-portal/chats/${encodeURIComponent(
-          activeChat.id
-        )}/messages`,
+        `/api/agent-portal/chats/${encodeURIComponent(activeChat.id)}/messages${q}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -450,22 +451,17 @@ function AgentChat() {
       );
 
       const data = await res.json().catch(() => ({} as any));
-
       if (!res.ok) throw new Error(data.error || "Error al enviar archivo");
 
       const saved: Message | undefined = data.message;
 
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m
-        )
+        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
       );
     } catch (e: any) {
       console.error(e);
       setError(e.message || "Error al enviar archivo");
-      setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m))
-      );
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, status: "pending" } : m)));
     } finally {
       setUploading(false);
     }
@@ -488,9 +484,7 @@ function AgentChat() {
   };
 
   const activePhoneFormatted =
-    activeChat && !isGroupChat(activeChat)
-      ? formatPhone(activeChat.phone ?? null)
-      : null;
+    activeChat && !isGroupChat(activeChat) ? formatPhone(activeChat.phone ?? null) : null;
 
   // ====== Filtros ======
   const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -504,19 +498,14 @@ function AgentChat() {
     const displayName = getChatDisplayName(chat).toLowerCase();
     const phone = (formatPhone(chat.phone ?? null) || "").toLowerCase();
 
-    return (
-      displayName.includes(normalizedSearch) || phone.includes(normalizedSearch)
-    );
+    return displayName.includes(normalizedSearch) || phone.includes(normalizedSearch);
   });
 
   // ====== helpers del modal de grupo ======
   const toggleParticipant = (chatId: string) => {
     setGroupSelected((prev) => {
       if (prev.includes(chatId)) {
-        // al desmarcar participante, también lo sacamos de admins
-        setGroupAdmins((adminsPrev) =>
-          adminsPrev.filter((id) => id !== chatId)
-        );
+        setGroupAdmins((adminsPrev) => adminsPrev.filter((id) => id !== chatId));
         return prev.filter((id) => id !== chatId);
       }
       return [...prev, chatId];
@@ -524,20 +513,11 @@ function AgentChat() {
   };
 
   const toggleAdmin = (chatId: string) => {
-    setGroupAdmins((prev) =>
-      prev.includes(chatId)
-        ? prev.filter((id) => id !== chatId)
-        : [...prev, chatId]
-    );
-    // si lo marco admin y no estaba seleccionado, lo selecciono
-    setGroupSelected((prev) =>
-      prev.includes(chatId) ? prev : [...prev, chatId]
-    );
+    setGroupAdmins((prev) => (prev.includes(chatId) ? prev.filter((id) => id !== chatId) : [...prev, chatId]));
+    setGroupSelected((prev) => (prev.includes(chatId) ? prev : [...prev, chatId]));
   };
 
-  const handleGroupAvatarChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleGroupAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = "";
@@ -555,61 +535,63 @@ function AgentChat() {
     reader.readAsDataURL(file);
   };
 
+  // ✅ crear grupo con token (y opcional lineId si quisieras, pero acá no aplica chat puntual)
   const handleCreateGroup = async () => {
-  const name = groupName.trim();
-  if (!name) {
-    setGroupError("Poné un nombre para el grupo.");
-    return;
-  }
-
-  try {
-    setCreatingGroup(true);
-    setGroupError(null);
-
-    // 👇 Armamos el payload con los NOMBRES que espera el WA-SERVER
-    const res = await fetch("/api/agent-portal/chats/groups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        description: groupDescription.trim() || undefined,
-        participants: groupSelected,          // ids de chat (549...@c.us)
-        messagesAdminsOnly: groupAdminsOnly,  // boolean
-        adminNumbers: groupAdmins,            // mismos ids que arriba
-        avatar: groupAvatar
-          ? {
-              mimetype: groupAvatar.mimetype,
-              fileName: groupAvatar.fileName,
-              dataUrl: groupAvatar.dataUrl,
-            }
-          : undefined,
-      }),
-    });
-
-    const data = await res.json().catch(() => ({} as any));
-    if (!res.ok) throw new Error(data.error || "Error al crear grupo");
-
-    if (data.chat) {
-      setChats((prev) => [data.chat as ChatSummary, ...prev]);
+    const name = groupName.trim();
+    if (!name) {
+      setGroupError("Poné un nombre para el grupo.");
+      return;
     }
 
-    setFilterMode("groups");
+    try {
+      setCreatingGroup(true);
+      setGroupError(null);
 
-    // limpiar modal
-    setGroupName("");
-    setGroupDescription("");
-    setGroupSearch("");
-    setGroupSelected([]);
-    setGroupAdmins([]);
-    setGroupAdminsOnly(false);
-    setGroupAvatar(null);
-    setShowGroupModal(false);
-  } catch (e: any) {
-    setGroupError(e.message || "Error al crear grupo");
-  } finally {
-    setCreatingGroup(false);
-  }
-};
+      const q = buildPortalQuery(token, null);
+
+      const res = await fetch(`/api/agent-portal/chats/groups${q}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description: groupDescription.trim() || undefined,
+          participants: groupSelected,
+          messagesAdminsOnly: groupAdminsOnly,
+          adminNumbers: groupAdmins,
+          avatar: groupAvatar
+            ? {
+                mimetype: groupAvatar.mimetype,
+                fileName: groupAvatar.fileName,
+                dataUrl: groupAvatar.dataUrl,
+              }
+            : undefined,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data.error || "Error al crear grupo");
+
+      if (data.chat) {
+        setChats((prev) => [data.chat as ChatSummary, ...prev]);
+      }
+
+      setFilterMode("groups");
+
+      // limpiar modal
+      setGroupName("");
+      setGroupDescription("");
+      setGroupSearch("");
+      setGroupSelected([]);
+      setGroupAdmins([]);
+      setGroupAdminsOnly(false);
+      setGroupAvatar(null);
+      setShowGroupModal(false);
+    } catch (e: any) {
+      setGroupError(e.message || "Error al crear grupo");
+    } finally {
+      setCreatingGroup(false);
+    }
+  };
 
   const closeGroupModal = () => {
     if (creatingGroup) return;
@@ -633,31 +615,27 @@ function AgentChat() {
           <div className="px-4 py-3 border-b border-slate-800">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-sky-400/70">
-                  Bandeja
-                </p>
-                <p className="text-sm font-semibold text-slate-50">
-                  Chats asignados
-                </p>
+                <p className="text-xs uppercase tracking-[0.2em] text-sky-400/70">Bandeja</p>
+                <p className="text-sm font-semibold text-slate-50">Chats asignados</p>
               </div>
 
               <button
-  type="button"
-  onClick={() => {
-    setShowGroupModal(true);        // 👈 en vez de setIsGroupModalOpen
-    setGroupName("");
-    setGroupDescription("");
-    setGroupSearch("");
-    setGroupSelected([]);
-    setGroupAdmins([]);
-    setGroupAdminsOnly(false);
-    setGroupAvatar(null);
-    setGroupError(null);
-  }}
-  className="inline-flex items-center justify-center rounded-full bg-sky-500/90 px-2.5 py-1 text-[10px] font-semibold text-slate-950 hover:bg-sky-400 transition"
->
-  + Grupo
-</button>
+                type="button"
+                onClick={() => {
+                  setShowGroupModal(true);
+                  setGroupName("");
+                  setGroupDescription("");
+                  setGroupSearch("");
+                  setGroupSelected([]);
+                  setGroupAdmins([]);
+                  setGroupAdminsOnly(false);
+                  setGroupAvatar(null);
+                  setGroupError(null);
+                }}
+                className="inline-flex items-center justify-center rounded-full bg-sky-500/90 px-2.5 py-1 text-[10px] font-semibold text-slate-950 hover:bg-sky-400 transition"
+              >
+                + Grupo
+              </button>
             </div>
 
             {/* Filtros */}
@@ -710,15 +688,11 @@ function AgentChat() {
 
           <div className="flex-1 overflow-y-auto">
             {loadingChats && (
-              <div className="px-3 py-2 text-[11px] text-slate-400">
-                Cargando chats…
-              </div>
+              <div className="px-3 py-2 text-[11px] text-slate-400">Cargando chats…</div>
             )}
 
             {filteredChats.length === 0 && !loadingChats && (
-              <div className="px-3 py-4 text-[11px] text-slate-500">
-                No hay chats en esta vista.
-              </div>
+              <div className="px-3 py-4 text-[11px] text-slate-500">No hay chats en esta vista.</div>
             )}
 
             {filteredChats.map((chat) => {
@@ -736,35 +710,21 @@ function AgentChat() {
                 >
                   <div className="h-8 w-8 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden text-[11px] font-semibold text-sky-300">
                     {avatarSrc ? (
-                      <img
-                        src={avatarSrc}
-                        alt={displayName}
-                        className="h-full w-full object-cover"
-                      />
+                      <img src={avatarSrc} alt={displayName} className="h-full w-full object-cover" />
                     ) : (
                       <span>{displayName[0] ?? "?"}</span>
                     )}
                   </div>
 
                   <div className="flex flex-1 flex-col min-w-0">
-                    <span className="truncate text-slate-100 font-medium">
-                      {displayName}
-                    </span>
-                    {phone && (
-                      <span className="text-[10px] text-slate-500">
-                        {phone}
-                      </span>
-                    )}
-                    <span className="mt-0.5 line-clamp-1 text-[11px] text-slate-400">
-                      {chat.lastMessage}
-                    </span>
+                    <span className="truncate text-slate-100 font-medium">{displayName}</span>
+                    {phone && <span className="text-[10px] text-slate-500">{phone}</span>}
+                    <span className="mt-0.5 line-clamp-1 text-[11px] text-slate-400">{chat.lastMessage}</span>
                   </div>
 
                   <div className="flex flex-col items-end gap-1">
                     <span className="text-[10px] text-slate-500">
-                      {chat.lastMessageAt
-                        ? formatTime(chat.lastMessageAt)
-                        : ""}
+                      {chat.lastMessageAt ? formatTime(chat.lastMessageAt) : ""}
                     </span>
                     {chat.unreadCount ? (
                       <span className="flex h-4 w-4 items-center justify-center rounded-full bg-sky-500 text-[10px] text-white">
@@ -787,25 +747,15 @@ function AgentChat() {
                 {(() => {
                   const avatar = getAvatarFromChat(activeChat || undefined);
                   if (avatar) {
-                    return (
-                      <img
-                        src={avatar}
-                        alt={getChatDisplayName(activeChat)}
-                        className="h-full w-full object-cover"
-                      />
-                    );
+                    return <img src={avatar} alt={getChatDisplayName(activeChat)} className="h-full w-full object-cover" />;
                   }
                   const headerName = getChatDisplayName(activeChat);
                   return <span>{headerName[0] ?? "?"}</span>;
                 })()}
               </div>
               <div>
-                <p className="text-sm font-semibold text-slate-50">
-                  {getChatDisplayName(activeChat)}
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  {activePhoneFormatted || ""}
-                </p>
+                <p className="text-sm font-semibold text-slate-50">{getChatDisplayName(activeChat)}</p>
+                <p className="text-[11px] text-slate-500">{activePhoneFormatted || ""}</p>
               </div>
             </div>
 
@@ -824,9 +774,7 @@ function AgentChat() {
             )}
 
             {loadingMessages && messages.length === 0 && (
-              <div className="text-[11px] text-slate-400">
-                Cargando mensajes…
-              </div>
+              <div className="text-[11px] text-slate-400">Cargando mensajes…</div>
             )}
 
             <div className="flex flex-col gap-1 max-w-4xl mx-auto">
@@ -839,26 +787,15 @@ function AgentChat() {
                   .filter((ch) => ch >= "0" && ch <= "9")
                   .join("");
 
-                const senderInitial =
-                  msg.senderName?.[0] ||
-                  (digitsOnly ? digitsOnly.slice(-2) : "?");
+                const senderInitial = msg.senderName?.[0] || (digitsOnly ? digitsOnly.slice(-2) : "?");
 
                 return (
-                  <div
-                    key={msg.id}
-                    className={`flex w-full ${
-                      isMine ? "justify-end" : "justify-start"
-                    }`}
-                  >
+                  <div key={msg.id} className={`flex w-full ${isMine ? "justify-end" : "justify-start"}`}>
                     {!isMine && (
                       <div className="mr-2 flex items-end">
                         <div className="h-7 w-7 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden text-[11px] font-semibold text-sky-300">
                           {msg.senderAvatar ? (
-                            <img
-                              src={msg.senderAvatar}
-                              alt={msg.senderName ?? "Contacto"}
-                              className="h-full w-full object-cover"
-                            />
+                            <img src={msg.senderAvatar} alt={msg.senderName ?? "Contacto"} className="h-full w-full object-cover" />
                           ) : (
                             <span>{senderInitial}</span>
                           )}
@@ -897,61 +834,35 @@ function AgentChat() {
                           className="mb-1 flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] hover:bg-slate-800"
                         >
                           <span>📄</span>
-                          <span className="truncate">
-                            {msg.media.fileName || "Documento"}
-                          </span>
-                          <span className="ml-auto text-[10px] text-slate-400">
-                            Descargar
-                          </span>
+                          <span className="truncate">{msg.media.fileName || "Documento"}</span>
+                          <span className="ml-auto text-[10px] text-slate-400">Descargar</span>
                         </a>
                       )}
 
                       {msg.media && msg.type === "audio" && (
                         <div className="mb-1">
-                          <audio
-                            controls
-                            src={msg.media.dataUrl}
-                            className="w-56 sm:w-64"
-                          />
+                          <audio controls src={msg.media.dataUrl} className="w-56 sm:w-64" />
                         </div>
                       )}
 
-                      {msg.media &&
-                        msg.type &&
-                        msg.type !== "image" &&
-                        msg.type !== "document" &&
-                        msg.type !== "audio" && (
-                          <a
-                            href={msg.media.dataUrl}
-                            download={msg.media.fileName || "archivo"}
-                            className="mb-1 flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] hover:bg-slate-800"
-                          >
-                            <span>📎</span>
-                            <span className="truncate">
-                              {msg.media.fileName || "Archivo adjunto"}
-                            </span>
-                            <span className="ml-auto text-[10px] text-slate-400">
-                              Descargar
-                            </span>
-                          </a>
-                        )}
-
-                      {renderedBody.trim() && (
-                        <span className="whitespace-pre-wrap break-words">
-                          {renderedBody}
-                        </span>
+                      {msg.media && msg.type && msg.type !== "image" && msg.type !== "document" && msg.type !== "audio" && (
+                        <a
+                          href={msg.media.dataUrl}
+                          download={msg.media.fileName || "archivo"}
+                          className="mb-1 flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] hover:bg-slate-800"
+                        >
+                          <span>📎</span>
+                          <span className="truncate">{msg.media.fileName || "Archivo adjunto"}</span>
+                          <span className="ml-auto text-[10px] text-slate-400">Descargar</span>
+                        </a>
                       )}
+
+                      {renderedBody.trim() && <span className="whitespace-pre-wrap break-words">{renderedBody}</span>}
 
                       <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-slate-400">
                         <span>{formatTime(msg.timestamp)}</span>
                         {isMine && msg.status && (
-                          <span
-                            className={
-                              msg.status === "read"
-                                ? "text-sky-400"
-                                : "text-slate-400"
-                            }
-                          >
+                          <span className={msg.status === "read" ? "text-sky-400" : "text-slate-400"}>
                             {getStatusIcon(msg.status)}
                           </span>
                         )}
@@ -969,10 +880,7 @@ function AgentChat() {
           <footer className="flex items-center gap-3 px-4 py-3 border-t border-slate-800 bg-slate-900">
             {pendingMedia && (
               <div className="text-[11px] text-slate-300 bg-slate-800 border border-slate-700 rounded px-2 py-1 max-w-xs truncate">
-                Archivo listo para enviar:{" "}
-                <span className="font-medium">
-                  {pendingMedia.fileName || "archivo"}
-                </span>
+                Archivo listo para enviar: <span className="font-medium">{pendingMedia.fileName || "archivo"}</span>
               </div>
             )}
 
@@ -983,12 +891,7 @@ function AgentChat() {
             >
               📎
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              onChange={handleFileChange}
-            />
+            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange} />
 
             <div className="flex-1">
               <textarea
@@ -1009,12 +912,7 @@ function AgentChat() {
             <button
               type="button"
               onClick={handleSend}
-              disabled={
-                (!input.trim() && !pendingMedia) ||
-                sending ||
-                uploading ||
-                !activeChat
-              }
+              disabled={(!input.trim() && !pendingMedia) || sending || uploading || !activeChat}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-sky-500 text-base text-slate-950 disabled:opacity-50 shadow-[0_0_20px_rgba(56,189,248,0.5)]"
             >
               ➤
@@ -1029,18 +927,10 @@ function AgentChat() {
           <div className="w-full max-w-xl rounded-2xl bg-slate-950 border border-slate-800 shadow-2xl p-6">
             <div className="flex items-start justify-between gap-3 mb-4">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-sky-400/70">
-                  Nuevo grupo
-                </p>
-                <h2 className="text-lg font-semibold text-slate-50">
-                  Crear grupo de chats
-                </h2>
+                <p className="text-xs uppercase tracking-[0.2em] text-sky-400/70">Nuevo grupo</p>
+                <h2 className="text-lg font-semibold text-slate-50">Crear grupo de chats</h2>
               </div>
-              <button
-                type="button"
-                onClick={closeGroupModal}
-                className="text-slate-400 hover:text-slate-100 text-sm"
-              >
+              <button type="button" onClick={closeGroupModal} className="text-slate-400 hover:text-slate-100 text-sm">
                 ✕
               </button>
             </div>
@@ -1049,11 +939,7 @@ function AgentChat() {
               <div className="flex flex-col items-center gap-2">
                 <div className="h-14 w-14 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden">
                   {groupAvatar ? (
-                    <img
-                      src={groupAvatar.dataUrl}
-                      alt={groupAvatar.fileName || "Grupo"}
-                      className="h-full w-full object-cover"
-                    />
+                    <img src={groupAvatar.dataUrl} alt={groupAvatar.fileName || "Grupo"} className="h-full w-full object-cover" />
                   ) : (
                     <span className="text-xl text-slate-300">👥</span>
                   )}
@@ -1076,9 +962,7 @@ function AgentChat() {
 
               <div className="flex-1 space-y-2">
                 <div>
-                  <label className="text-[11px] text-slate-400">
-                    Nombre del grupo
-                  </label>
+                  <label className="text-[11px] text-slate-400">Nombre del grupo</label>
                   <input
                     className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky-500"
                     placeholder="Ej: Clientes VIP, Equipo Ventas…"
@@ -1087,9 +971,7 @@ function AgentChat() {
                   />
                 </div>
                 <div>
-                  <label className="text-[11px] text-slate-400">
-                    Descripción (opcional)
-                  </label>
+                  <label className="text-[11px] text-slate-400">Descripción (opcional)</label>
                   <textarea
                     className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky-500 resize-none"
                     rows={2}
@@ -1103,9 +985,7 @@ function AgentChat() {
 
             {/* Participantes */}
             <div className="mb-4">
-              <p className="text-[11px] font-semibold text-slate-400 mb-1">
-                Participantes (chats individuales)
-              </p>
+              <p className="text-[11px] font-semibold text-slate-400 mb-1">Participantes (chats individuales)</p>
               <input
                 className="w-full rounded-full bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 outline-none focus:border-sky-500 mb-2"
                 placeholder="Buscar por nombre o número"
@@ -1120,13 +1000,8 @@ function AgentChat() {
                     const term = groupSearch.trim().toLowerCase();
                     if (!term) return true;
                     const name = getChatDisplayName(c).toLowerCase();
-                    const phone =
-                      (formatPhone(c.phone ?? null) || "").toLowerCase();
-                    return (
-                      name.includes(term) ||
-                      phone.includes(term) ||
-                      (c.name || "").toLowerCase().includes(term)
-                    );
+                    const phone = (formatPhone(c.phone ?? null) || "").toLowerCase();
+                    return name.includes(term) || phone.includes(term) || (c.name || "").toLowerCase().includes(term);
                   })
                   .map((c) => {
                     const displayName = getChatDisplayName(c);
@@ -1152,24 +1027,14 @@ function AgentChat() {
                         />
                         <div className="h-7 w-7 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden text-[11px] font-semibold text-sky-300">
                           {avatar ? (
-                            <img
-                              src={avatar}
-                              alt={displayName}
-                              className="h-full w-full object-cover"
-                            />
+                            <img src={avatar} alt={displayName} className="h-full w-full object-cover" />
                           ) : (
                             <span>{displayName[0] ?? "?"}</span>
                           )}
                         </div>
                         <div className="flex flex-col min-w-0 flex-1">
-                          <span className="truncate text-[11px]">
-                            {displayName}
-                          </span>
-                          {phone && (
-                            <span className="text-[10px] text-slate-500">
-                              {phone}
-                            </span>
-                          )}
+                          <span className="truncate text-[11px]">{displayName}</span>
+                          {phone && <span className="text-[10px] text-slate-500">{phone}</span>}
                         </div>
                         <label
                           className="flex items-center gap-1 text-[10px] text-slate-300"
@@ -1178,12 +1043,7 @@ function AgentChat() {
                             toggleAdmin(c.id);
                           }}
                         >
-                          <input
-                            type="checkbox"
-                            checked={isAdmin}
-                            onChange={() => {}}
-                            className="h-3 w-3 rounded border-slate-500 bg-slate-900"
-                          />
+                          <input type="checkbox" checked={isAdmin} onChange={() => {}} className="h-3 w-3 rounded border-slate-500 bg-slate-900" />
                           <span>Admin</span>
                         </label>
                       </div>
@@ -1194,9 +1054,7 @@ function AgentChat() {
 
             {/* Permisos de mensajes */}
             <div className="mb-4">
-              <p className="text-[11px] font-semibold text-slate-400 mb-1">
-                Permisos de mensajes
-              </p>
+              <p className="text-[11px] font-semibold text-slate-400 mb-1">Permisos de mensajes</p>
               <div className="space-y-1 text-xs text-slate-200">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input

@@ -1,7 +1,7 @@
 // app/api/whatsapp-lines/claim/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { getCurrentOwnerId } from "@/lib/auth"; // alias de getCurrentUserId
+import { getCurrentUserId } from "@/lib/auth"; // alias de getCurrentUserId
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 👇 SIN pasar req, la función no recibe parámetros
-    const ownerId = await getCurrentOwnerId();
+    const ownerId = await getCurrentUserId();
 
     if (!ownerId) {
       return NextResponse.json(

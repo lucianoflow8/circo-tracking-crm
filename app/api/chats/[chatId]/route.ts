@@ -11,27 +11,50 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
   return await Promise.resolve(params);
 }
 
+function normalizeChatId(raw: string) {
+  const trimmed = (raw || "").trim();
+  const isGroup = trimmed.endsWith("@g.us");
+  const isJid = trimmed.includes("@");
+  const phone = !isGroup ? toDigits(isJid ? trimmed.split("@")[0] : trimmed) : "";
+
+  const jid = isJid
+    ? trimmed
+    : phone
+    ? `${phone}@c.us`
+    : "";
+
+  return { jid, phone, isGroup };
+}
+
 export async function GET(
   _req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
 ) {
   try {
     const { chatId } = await unwrapParams(context.params);
-    const phone = toDigits(chatId);
-
-    if (!phone) {
-      return NextResponse.json(
-        { error: "Teléfono inválido" },
-        { status: 400 }
-      );
-    }
+    const { jid, phone, isGroup } = normalizeChatId(chatId);
 
     const userId = await getCurrentUserId();
     if (!userId) {
-      return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "No autenticado" }, { status: 401 });
+    }
+
+    // ✅ GRUPOS: no hay phone => no buscamos CrmMessage (tu DB está por phone)
+    if (isGroup) {
+      const chat = {
+        id: jid || chatId,
+        contactName: "Grupo",
+        lineId: null,
+        contactPhoneRaw: null,
+        isGroup: true,
+        messages: [],
+      };
+      return NextResponse.json({ chat }, { status: 200 });
+    }
+
+    // ✅ INDIVIDUALES
+    if (!phone) {
+      return NextResponse.json({ error: "Teléfono inválido" }, { status: 400 });
     }
 
     // Traemos todos los mensajes de ese teléfono para ese dueño
@@ -44,20 +67,18 @@ export async function GET(
     });
 
     if (!rows.length) {
-      return NextResponse.json(
-        { error: "Chat not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 });
     }
 
     // Usamos la última línea usada con ese teléfono
     const last = rows[rows.length - 1];
 
     const chat = {
-      id: phone, // usamos el número como id de chat
-      contactName: phone, // acá luego podés enchufar un nombre “lindo”
+      id: jid || phone,
+      contactName: phone,
       lineId: last.lineId,
       contactPhoneRaw: phone,
+      isGroup: false,
       messages: rows.map((m) => ({
         id: m.waMessageId || m.id,
         body: m.body || "",
@@ -69,9 +90,6 @@ export async function GET(
     return NextResponse.json({ chat }, { status: 200 });
   } catch (err) {
     console.error("[API /api/chats/[chatId] GET] Error:", err);
-    return NextResponse.json(
-      { error: "Error interno" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error interno" }, { status: 500 });
   }
 }

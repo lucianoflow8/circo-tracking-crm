@@ -12,14 +12,25 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 
 const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
 
+/**
+ * ✅ FIX MINIMO:
+ * - Si viene "xxxx@g.us" => grupo: jid = 그대로, phone = "" (no se usa en DB)
+ * - Si viene "xxxx@c.us" => individual: jid = 그대로, phone = dígitos
+ * - Si viene "54911..."  => individual: jid = "54911...@c.us", phone = dígitos
+ */
 function resolvePhoneAndJid(rawChatId: string) {
   const trimmed = (rawChatId || "").trim();
+  if (!trimmed) return { phone: "", jid: "" };
+
+  // Si ya es JID válido, respetarlo
+  if (trimmed.includes("@")) {
+    const phone = trimmed.endsWith("@c.us") ? toDigits(trimmed.split("@")[0]) : "";
+    return { phone, jid: trimmed };
+  }
+
+  // Si no tiene @ => es número
   const phone = toDigits(trimmed);
-
-  let jid: string;
-  if (trimmed.includes("@")) jid = trimmed;
-  else jid = `${phone}@c.us`;
-
+  const jid = phone ? `${phone}@c.us` : "";
   return { phone, jid };
 }
 
@@ -32,16 +43,13 @@ async function ensureConnected(lineId: string, ownerId: string) {
     await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ownerId }),
+      body: JSON.stringify({ ownerId }), // wa-server lo ignora, no molesta
     }).catch(() => null);
   } catch {}
 }
 
 /**
  * Devuelve una lineId (external_line_id) válida para el usuario.
- * - Si viene desiredLineId: valida que sea del user (por external_line_id o id)
- * - Si no viene: intenta con lastMsgLineId (si pertenece al user)
- * - Si no: usa la "primera conectada" del user
  */
 async function resolveUserLineId(opts: {
   userId: string;
@@ -66,18 +74,17 @@ async function resolveUserLineId(opts: {
     return { ok: false as const, error: "No tenés líneas conectadas" };
   }
 
-  // 1) si viene desired, validar
+  // 1) desiredLineId
   if (desiredLineId) {
     const found = connected.find(
       (l: any) => l.external_line_id === desiredLineId || l.id === desiredLineId
     );
     if (!found) return { ok: false as const, error: "Esa línea no pertenece al usuario" };
-
     const ext = pickExternalLineId(found);
     return { ok: true as const, lineId: ext! };
   }
 
-  // 2) si no viene desired, probar lastMsgLineId (pero validarlo)
+  // 2) lastMsgLineId (si aplica)
   if (lastMsgLineId) {
     const found = connected.find(
       (l: any) => l.external_line_id === lastMsgLineId || l.id === lastMsgLineId
@@ -88,7 +95,7 @@ async function resolveUserLineId(opts: {
     }
   }
 
-  // 3) fallback: primera conectada
+  // 3) primera conectada
   const ext = pickExternalLineId(connected[0]);
   return { ok: true as const, lineId: ext! };
 }
@@ -109,43 +116,51 @@ export async function GET(
     const { chatId } = await unwrapParams(context.params);
     const { phone, jid } = resolvePhoneAndJid(chatId);
 
-    if (!phone) return NextResponse.json({ messages: [] }, { status: 200 });
+    if (!jid) return NextResponse.json({ messages: [] }, { status: 200 });
 
     const url = new URL(req.url);
     const desiredLineId = url.searchParams.get("lineId")?.trim() || null;
 
-    // last line usada para ese phone
+    // passthrough opcional
+    const limit = url.searchParams.get("limit")?.trim() || null;
+    const includeMedia = url.searchParams.get("includeMedia")?.trim() || null;
+
+    // last line usada para ese phone (solo si NO es grupo)
     let lastMsgLineId: string | null = null;
-    try {
-      const lastMsg = await prisma.crmMessage.findFirst({
-        where: { phone, ownerId: userId },
-        orderBy: { createdAt: "desc" },
-      });
-      lastMsgLineId = (lastMsg?.lineId as any) || null;
-    } catch {}
+    if (phone) {
+      try {
+        const lastMsg = await prisma.crmMessage.findFirst({
+          where: { phone, ownerId: userId },
+          orderBy: { createdAt: "desc" },
+        });
+        lastMsgLineId = (lastMsg?.lineId as any) || null;
+      } catch {}
+    }
 
     const resolved = await resolveUserLineId({ userId, desiredLineId, lastMsgLineId });
     if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 403 });
 
     const lineId = resolved.lineId;
 
+    const waUrl =
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages` +
+      `?` +
+      new URLSearchParams({
+        ...(limit ? { limit } : {}),
+        ...(includeMedia ? { includeMedia } : {}),
+      }).toString();
+
     const [waMessagesRaw, dbRows] = await Promise.all([
       (async () => {
         try {
-          let waRes = await fetch(
-            `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-            { cache: "no-store" }
-          );
+          let waRes = await fetch(waUrl, { cache: "no-store" });
 
-          // Session not found => autoconnect y retry 1 vez
+          // Session not found => autoconnect y retry
           if (!waRes.ok) {
             const text = await waRes.text().catch(() => "");
             if (waRes.status === 404 && text.includes("Session not found")) {
               await ensureConnected(lineId, userId);
-              waRes = await fetch(
-                `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-                { cache: "no-store" }
-              );
+              waRes = await fetch(waUrl, { cache: "no-store" });
             }
           }
 
@@ -155,7 +170,7 @@ export async function GET(
             return [] as any[];
           }
 
-          const waData = await waRes.json();
+          const waData = await waRes.json().catch(() => ({} as any));
           const arr = (waData?.messages ?? []) as any[];
           return Array.isArray(arr) ? arr : [];
         } catch (err) {
@@ -164,6 +179,8 @@ export async function GET(
         }
       })(),
       (async () => {
+        // ✅ si es grupo (phone="") no tiene sentido buscar en DB por phone
+        if (!phone) return [];
         try {
           return await prisma.crmMessage.findMany({
             where: { phone, ownerId: userId },
@@ -255,20 +272,22 @@ export async function POST(
     }
 
     const { phone, jid } = resolvePhoneAndJid(chatId);
-    if (!phone) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
+    if (!jid) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
 
     const url = new URL(req.url);
     const desiredLineId = url.searchParams.get("lineId")?.trim() || null;
 
-    // last line usada para ese phone
+    // last line usada para ese phone (solo si NO es grupo)
     let lastMsgLineId: string | null = null;
-    try {
-      const lastMsg = await prisma.crmMessage.findFirst({
-        where: { phone, ownerId: userId },
-        orderBy: { createdAt: "desc" },
-      });
-      lastMsgLineId = (lastMsg?.lineId as any) || null;
-    } catch {}
+    if (phone) {
+      try {
+        const lastMsg = await prisma.crmMessage.findFirst({
+          where: { phone, ownerId: userId },
+          orderBy: { createdAt: "desc" },
+        });
+        lastMsgLineId = (lastMsg?.lineId as any) || null;
+      } catch {}
+    }
 
     const resolved = await resolveUserLineId({ userId, desiredLineId, lastMsgLineId });
     if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 403 });
@@ -320,51 +339,58 @@ export async function POST(
       waData = await waRes.json();
     } catch {}
 
+    // wa-server devuelve: { ok:true, message:{ id:"...", ... } }
     const waMessageId: string =
       (waData &&
         (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    const created = await prisma.crmMessage.upsert({
-      where: { waMessageId },
-      update: {
-        phone,
-        ownerId: userId,
-        lineId,
-        direction: "out",
-        body,
-        msgType,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
-      create: {
-        phone,
-        ownerId: userId,
-        lineId,
-        direction: "out",
-        body,
-        msgType,
-        waMessageId,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
-    });
+    // ✅ Guardar en CRMMessage SOLO si es chat individual (phone existe)
+    let created: any = null;
+    if (phone) {
+      created = await prisma.crmMessage.upsert({
+        where: { waMessageId },
+        update: {
+          phone,
+          ownerId: userId,
+          lineId,
+          direction: "out",
+          body,
+          msgType,
+          rawPayload: JSON.stringify(waData ?? null),
+        },
+        create: {
+          phone,
+          ownerId: userId,
+          lineId,
+          direction: "out",
+          body,
+          msgType,
+          waMessageId,
+          rawPayload: JSON.stringify(waData ?? null),
+        },
+      });
+    }
 
     const saved = {
-      id: created.waMessageId || created.id,
+      id: created?.waMessageId || waMessageId,
       fromMe: true,
-      body: created.body || "",
-      timestamp: created.createdAt.toISOString(),
+      body: created?.body || body || "",
+      timestamp: (created?.createdAt ? created.createdAt.toISOString() : new Date().toISOString()),
       status: "sent" as const,
-      type: (created.msgType as any) || "text",
+      type: (created?.msgType as any) || msgType || "text",
       media: media ?? null,
       senderName: undefined,
-      senderNumber: created.phone,
+      senderNumber: phone || null,
       senderAvatar: null,
     };
 
     return NextResponse.json({ message: saved }, { status: 200 });
   } catch (err: any) {
     console.error("[MESSAGES POST] Error interno:", err);
-    return NextResponse.json({ error: err?.message || "Error interno al enviar mensaje" }, { status: 500 });
+    return NextResponse.json(
+      { error: err?.message || "Error interno al enviar mensaje" },
+      { status: 500 }
+    );
   }
 }
-
