@@ -66,10 +66,8 @@ export async function GET(req: NextRequest) {
 
     // 2) Elegir línea: ?lineId= (si está en el portal) o la primera
     const lineIdParam = url.searchParams.get("lineId");
-    let effectiveLineId =
-      lineIdParam && lineIds.includes(lineIdParam)
-        ? lineIdParam
-        : lineIds[0];
+    const effectiveLineId =
+      lineIdParam && lineIds.includes(lineIdParam) ? lineIdParam : lineIds[0];
 
     // 3) Pedir chats al WA-SERVER
     const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(
@@ -90,7 +88,6 @@ export async function GET(req: NextRequest) {
       console.error("[agent-portal/chats] Error WA-SERVER:", res.status, data);
 
       if (res.status === 404 && data?.error === "Session not found") {
-        // Para el cajero devolvemos vacío pero sin romper
         return NextResponse.json(
           {
             ok: true,
@@ -157,8 +154,9 @@ export async function GET(req: NextRequest) {
       })();
 
       return {
-        id: rawId,
+        id: rawId, // ✅ se mantiene igual para no romper front
         waChatId: rawId,
+        lineId: effectiveLineId, // ✅ IMPORTANTÍSIMO para buildPortalQuery()
         name,
         isGroup,
         phone,
@@ -168,8 +166,7 @@ export async function GET(req: NextRequest) {
         unreadCount: c.unreadCount ?? 0,
         lastMessageFromMe: c.lastMessageFromMe ?? false,
         lastMessageStatus: c.lastMessageStatus ?? null,
-        profilePicUrl:
-          c.profilePicUrl || c.avatarUrl || c.photoUrl || null,
+        profilePicUrl: c.profilePicUrl || c.avatarUrl || c.photoUrl || null,
       };
     });
 

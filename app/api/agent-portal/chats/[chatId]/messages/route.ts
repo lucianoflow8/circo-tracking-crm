@@ -1,7 +1,7 @@
 // app/api/agent-portal/chats/[chatId]/messages/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getCurrentUserId } from "@/lib/auth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL!;
 const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
@@ -13,7 +13,6 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
 
 async function ensureConnected(lineId: string, ownerId: string) {
-  // Intenta conectar sin romper si ya está conectada
   try {
     await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
       method: "POST",
@@ -23,81 +22,128 @@ async function ensureConnected(lineId: string, ownerId: string) {
   } catch {}
 }
 
+async function getPortalFromToken(token: string) {
+  const { data: portal, error } = await supabaseAdmin
+    .from("agent_portals")
+    .select("id, owner_user_id, line_ids, enabled")
+    .eq("token", token)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[agent-portal/messages] Error select portal:", error);
+    return { portal: null as any, error: "No se pudo leer el portal" };
+  }
+
+  if (!portal || portal.enabled === false) {
+    return { portal: null as any, error: "Portal inexistente o deshabilitado" };
+  }
+
+  return { portal, error: null as string | null };
+}
+
+function pickLineId(portal: any, lineIdParam: string | null) {
+  const lineIds: string[] = (portal?.line_ids || []) as string[];
+  if (Array.isArray(lineIds) && lineIds.length > 0) {
+    if (lineIdParam && lineIds.includes(lineIdParam)) return lineIdParam;
+    return lineIds[0];
+  }
+  return lineIdParam || DEFAULT_LINE_ID;
+}
+
+function buildJidFromChatId(chatIdRaw: string) {
+  const chatId = decodeURIComponent(chatIdRaw || "");
+
+  // Si ya viene como jid (ej: 549...@c.us o 1203...@g.us) lo respetamos
+  if (chatId.includes("@g.us")) {
+    return { jid: chatId, phone: null, isGroup: true };
+  }
+  if (chatId.includes("@c.us")) {
+    const phone = toDigits(chatId);
+    return { jid: chatId, phone, isGroup: false };
+  }
+
+  // fallback: si vino como solo números
+  const phone = toDigits(chatId);
+  return { jid: phone ? `${phone}@c.us` : "", phone: phone || null, isGroup: false };
+}
+
 /* ============================================================
    GET: leer mensajes (WA-SERVER si puede, fallback CrmMessage)
    ============================================================ */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
 ) {
-  const { chatId } = await unwrapParams(context.params);
-  const phone = toDigits(chatId);
-
-  if (!phone) {
-    return NextResponse.json({ messages: [] }, { status: 200 });
-  }
-
-  // Owner (para autoconnect)
-  const ownerId = (await getCurrentUserId()) || null;
-
-  // Línea: última con la que habló ese teléfono
-  let lineId = DEFAULT_LINE_ID;
   try {
-    const lastMsg = await prisma.crmMessage.findFirst({
-      where: { phone },
-      orderBy: { createdAt: "desc" },
-    });
-    if (lastMsg?.lineId) lineId = lastMsg.lineId;
-  } catch (err) {
-    console.error("[agent-portal/messages GET] Error buscando línea para phone", phone, err);
-  }
+    const { chatId } = await unwrapParams(context.params);
 
-  const jid = `${phone}@c.us`;
+    const url = new URL(req.url);
+    const token = url.searchParams.get("token") || "";
+    const lineIdParam = url.searchParams.get("lineId");
 
-  // 1) Intentar traer desde WA-SERVER (con media)
-  let waMessages: any[] | null = null;
+    if (!token) {
+      return NextResponse.json({ error: "Falta token" }, { status: 400 });
+    }
 
-  try {
-    let waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-      { cache: "no-store" }
-    );
+    const { portal, error } = await getPortalFromToken(token);
+    if (error || !portal) {
+      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    }
 
-    // Si no hay sesión, autoconnect y reintentar 1 vez
-    if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
-        await ensureConnected(lineId, ownerId);
-        waRes = await fetch(
-          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-          { cache: "no-store" }
-        );
+    const ownerId: string = portal.owner_user_id;
+    const lineId = pickLineId(portal, lineIdParam);
+
+    const { jid, phone, isGroup } = buildJidFromChatId(chatId);
+    if (!jid) return NextResponse.json({ messages: [] }, { status: 200 });
+
+    // 1) Intentar WA-SERVER (con media)
+    let waMessages: any[] | null = null;
+
+    try {
+      let waRes = await fetch(
+        `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+        { cache: "no-store" }
+      );
+
+      // Session not found => autoconnect + retry 1 vez
+      if (!waRes.ok) {
+        const text = await waRes.text().catch(() => "");
+        if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
+          await ensureConnected(lineId, ownerId);
+          waRes = await fetch(
+            `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
+            { cache: "no-store" }
+          );
+        }
       }
+
+      if (waRes.ok) {
+        const waData = await waRes.json().catch(() => ({} as any));
+        waMessages = waData.messages || [];
+      } else {
+        const text = await waRes.text().catch(() => "");
+        console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, text.slice(0, 300));
+      }
+    } catch (err) {
+      console.error("[agent-portal/messages GET] Error llamando a WA-SERVER", err);
     }
 
-    if (waRes.ok) {
-      const waData = await waRes.json().catch(() => ({} as any));
-      waMessages = waData.messages || [];
-    } else {
-      const text = await waRes.text().catch(() => "");
-      console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, text.slice(0, 300));
+    if (waMessages && waMessages.length) {
+      waMessages.sort(
+        (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      );
+      return NextResponse.json({ messages: waMessages }, { status: 200 });
     }
-  } catch (err) {
-    console.error("[agent-portal/messages GET] Error llamando a WA-SERVER", err);
-  }
 
-  if (waMessages && waMessages.length) {
-    waMessages.sort(
-      (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
-    return NextResponse.json({ messages: waMessages }, { status: 200 });
-  }
+    // 2) Fallback DB (solo chats individuales): ownerId + lineId + phone
+    if (isGroup || !phone) {
+      return NextResponse.json({ messages: [] }, { status: 200 });
+    }
 
-  // 2) Fallback: sólo lo de CrmMessage (sin media)
-  try {
     const rows = await prisma.crmMessage.findMany({
-      where: { phone },
+      where: { ownerId, lineId, phone },
       orderBy: { createdAt: "asc" },
+      take: 300,
     });
 
     const messages = rows.map((row) => ({
@@ -107,7 +153,13 @@ export async function GET(
       timestamp: row.createdAt.toISOString(),
       status: row.direction === "out" ? ("sent" as const) : undefined,
       type: (row.msgType as any) || "text",
-      media: null,
+      media: row.mediaDataUrl
+        ? {
+            dataUrl: row.mediaDataUrl,
+            fileName: row.mediaFileName,
+            mimetype: row.mediaMimeType,
+          }
+        : null,
       senderName: undefined,
       senderNumber: row.phone,
       senderAvatar: null,
@@ -115,13 +167,13 @@ export async function GET(
 
     return NextResponse.json({ messages }, { status: 200 });
   } catch (err) {
-    console.error("[agent-portal/messages GET] Error fallback CrmMessage", err);
+    console.error("[agent-portal/messages GET] Error interno", err);
     return NextResponse.json({ messages: [] }, { status: 200 });
   }
 }
 
 /* ============================================================
-   POST: enviar mensaje desde el portal de agentes
+   POST: enviar mensaje desde portal (token) + guardar en CrmMessage
    ============================================================ */
 export async function POST(
   req: NextRequest,
@@ -129,6 +181,23 @@ export async function POST(
 ) {
   try {
     const { chatId } = await unwrapParams(context.params);
+
+    const url = new URL(req.url);
+    const token = url.searchParams.get("token") || "";
+    const lineIdParam = url.searchParams.get("lineId");
+
+    if (!token) {
+      return NextResponse.json({ error: "Falta token" }, { status: 400 });
+    }
+
+    const { portal, error } = await getPortalFromToken(token);
+    if (error || !portal) {
+      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    }
+
+    const ownerId: string = portal.owner_user_id;
+    const lineId = pickLineId(portal, lineIdParam);
+
     const bodyJson = await req.json().catch(() => ({} as any));
     const { body, media } = bodyJson || {};
 
@@ -136,27 +205,10 @@ export async function POST(
       return NextResponse.json({ error: "Se requiere body (texto) o media" }, { status: 400 });
     }
 
-    const phone = toDigits(chatId);
-    if (!phone) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
+    const { jid, phone, isGroup } = buildJidFromChatId(chatId);
+    if (!jid) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
 
-    const userId = await getCurrentUserId();
-    if (!userId) return NextResponse.json({ error: "No autenticado" }, { status: 401 });
-
-    let lineId = DEFAULT_LINE_ID;
-
-    try {
-      const lastMsg = await prisma.crmMessage.findFirst({
-        where: { phone, ownerId: userId },
-        orderBy: { createdAt: "desc" },
-      });
-      if (lastMsg?.lineId) lineId = lastMsg.lineId;
-    } catch (err) {
-      console.error("[agent-portal/messages POST] Error buscando línea para phone", phone, err);
-    }
-
-    const jid = `${phone}@c.us`;
-
-    // Tipo de mensaje
+    // Tipo de mensaje (mantengo tu lógica)
     let msgType: string = "text";
     if (media) {
       const mt: string = media.mimetype || "";
@@ -180,7 +232,7 @@ export async function POST(
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
       if (waRes.status === 404 && text.includes("Session not found")) {
-        await ensureConnected(lineId, userId);
+        await ensureConnected(lineId, ownerId);
         waRes = await fetch(
           `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
           {
@@ -205,12 +257,12 @@ export async function POST(
         (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // Guardar en DB
+    // Guardar en DB (clave: ownerId + lineId correctos)
     const created = await prisma.crmMessage.upsert({
       where: { waMessageId },
       update: {
-        phone,
-        ownerId: userId,
+        phone: phone || (isGroup ? toDigits(jid) : ""),
+        ownerId,
         lineId,
         direction: "out",
         body: body || "",
@@ -218,8 +270,8 @@ export async function POST(
         rawPayload: JSON.stringify(waData ?? null),
       },
       create: {
-        phone,
-        ownerId: userId,
+        phone: phone || (isGroup ? toDigits(jid) : ""),
+        ownerId,
         lineId,
         direction: "out",
         body: body || "",
