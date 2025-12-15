@@ -1,10 +1,9 @@
-// app/api/agent-portal/chats/[chatId]/messages/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const WA_SERVER_URL = process.env.WA_SERVER_URL!;
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID!;
+const WA_SERVER_URL = process.env.WA_SERVER_URL || "http://localhost:4002";
+const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
 
 async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
   return await Promise.resolve(params);
@@ -43,33 +42,28 @@ async function getPortalFromToken(token: string) {
 
 function pickLineId(portal: any, lineIdParam: string | null) {
   const lineIds: string[] = (portal?.line_ids || []) as string[];
-  if (Array.isArray(lineIds) && lineIds.length > 0) {
-    if (lineIdParam && lineIds.includes(lineIdParam)) return lineIdParam;
-    return lineIds[0];
-  }
-  return lineIdParam || DEFAULT_LINE_ID;
+
+  // ✅ si no hay líneas, no usamos DEFAULT (evita mezclar)
+  if (!Array.isArray(lineIds) || lineIds.length === 0) return null;
+
+  if (lineIdParam && lineIds.includes(lineIdParam)) return lineIdParam;
+  return lineIds[0];
 }
 
 function buildJidFromChatId(chatIdRaw: string) {
   const chatId = decodeURIComponent(chatIdRaw || "");
 
-  // Si ya viene como jid (ej: 549...@c.us o 1203...@g.us) lo respetamos
-  if (chatId.includes("@g.us")) {
-    return { jid: chatId, phone: null, isGroup: true };
-  }
+  if (chatId.includes("@g.us")) return { jid: chatId, phone: null, isGroup: true };
+
   if (chatId.includes("@c.us")) {
     const phone = toDigits(chatId);
     return { jid: chatId, phone, isGroup: false };
   }
 
-  // fallback: si vino como solo números
   const phone = toDigits(chatId);
   return { jid: phone ? `${phone}@c.us` : "", phone: phone || null, isGroup: false };
 }
 
-/* ============================================================
-   GET: leer mensajes (WA-SERVER si puede, fallback CrmMessage)
-   ============================================================ */
 export async function GET(
   req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
@@ -81,22 +75,19 @@ export async function GET(
     const token = url.searchParams.get("token") || "";
     const lineIdParam = url.searchParams.get("lineId");
 
-    if (!token) {
-      return NextResponse.json({ error: "Falta token" }, { status: 400 });
-    }
+    if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) {
-      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
-    }
+    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
+    if (!lineId) return NextResponse.json({ messages: [] }, { status: 200 });
 
     const { jid, phone, isGroup } = buildJidFromChatId(chatId);
     if (!jid) return NextResponse.json({ messages: [] }, { status: 200 });
 
-    // 1) Intentar WA-SERVER (con media)
+    // 1) WA-SERVER
     let waMessages: any[] | null = null;
 
     try {
@@ -105,7 +96,6 @@ export async function GET(
         { cache: "no-store" }
       );
 
-      // Session not found => autoconnect + retry 1 vez
       if (!waRes.ok) {
         const text = await waRes.text().catch(() => "");
         if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
@@ -129,16 +119,12 @@ export async function GET(
     }
 
     if (waMessages && waMessages.length) {
-      waMessages.sort(
-        (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      );
+      waMessages.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
       return NextResponse.json({ messages: waMessages }, { status: 200 });
     }
 
-    // 2) Fallback DB (solo chats individuales): ownerId + lineId + phone
-    if (isGroup || !phone) {
-      return NextResponse.json({ messages: [] }, { status: 200 });
-    }
+    // 2) Fallback DB (solo individual)
+    if (isGroup || !phone) return NextResponse.json({ messages: [] }, { status: 200 });
 
     const rows = await prisma.crmMessage.findMany({
       where: { ownerId, lineId, phone },
@@ -146,24 +132,25 @@ export async function GET(
       take: 300,
     });
 
-    const messages = rows.map((row) => ({
-      id: row.waMessageId || row.id,
-      fromMe: row.direction === "out",
-      body: row.body || "",
-      timestamp: row.createdAt.toISOString(),
-      status: row.direction === "out" ? ("sent" as const) : undefined,
-      type: (row.msgType as any) || "text",
-      media: row.mediaDataUrl
-        ? {
-            dataUrl: row.mediaDataUrl,
-            fileName: row.mediaFileName,
-            mimetype: row.mediaMimeType,
-          }
-        : null,
-      senderName: undefined,
-      senderNumber: row.phone,
-      senderAvatar: null,
-    }));
+    const messages = rows.map((row) => {
+      const r: any = row as any;
+      const media = r.mediaDataUrl
+        ? { dataUrl: r.mediaDataUrl, fileName: r.mediaFileName || null, mimetype: r.mediaMimeType || "application/octet-stream" }
+        : null;
+
+      return {
+        id: row.waMessageId || row.id,
+        fromMe: row.direction === "out",
+        body: row.body || "",
+        timestamp: row.createdAt.toISOString(),
+        status: row.direction === "out" ? ("sent" as const) : undefined,
+        type: (row.msgType as any) || "text",
+        media,
+        senderName: undefined,
+        senderNumber: row.phone,
+        senderAvatar: null,
+      };
+    });
 
     return NextResponse.json({ messages }, { status: 200 });
   } catch (err) {
@@ -172,9 +159,6 @@ export async function GET(
   }
 }
 
-/* ============================================================
-   POST: enviar mensaje desde portal (token) + guardar en CrmMessage
-   ============================================================ */
 export async function POST(
   req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
@@ -186,17 +170,14 @@ export async function POST(
     const token = url.searchParams.get("token") || "";
     const lineIdParam = url.searchParams.get("lineId");
 
-    if (!token) {
-      return NextResponse.json({ error: "Falta token" }, { status: 400 });
-    }
+    if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) {
-      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
-    }
+    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
+    if (!lineId) return NextResponse.json({ error: "Portal sin líneas asignadas" }, { status: 400 });
 
     const bodyJson = await req.json().catch(() => ({} as any));
     const { body, media } = bodyJson || {};
@@ -208,7 +189,6 @@ export async function POST(
     const { jid, phone, isGroup } = buildJidFromChatId(chatId);
     if (!jid) return NextResponse.json({ error: "chatId inválido" }, { status: 400 });
 
-    // Tipo de mensaje (mantengo tu lógica)
     let msgType: string = "text";
     if (media) {
       const mt: string = media.mimetype || "";
@@ -218,28 +198,18 @@ export async function POST(
       else msgType = "media";
     }
 
-    // Enviar a WA-SERVER
     let waRes = await fetch(
       `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body, media, type: msgType }),
-      }
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, media, type: msgType }) }
     );
 
-    // Session not found => autoconnect y retry 1 vez
     if (!waRes.ok) {
       const text = await waRes.text().catch(() => "");
       if (waRes.status === 404 && text.includes("Session not found")) {
         await ensureConnected(lineId, ownerId);
         waRes = await fetch(
           `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ body, media, type: msgType }),
-          }
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, media, type: msgType }) }
         );
       }
     }
@@ -253,48 +223,34 @@ export async function POST(
     const waData = await waRes.json().catch(() => null);
 
     const waMessageId: string =
-      (waData &&
-        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
+      (waData && (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    // Guardar en DB (clave: ownerId + lineId correctos)
+    const phoneToSave = phone || (isGroup ? toDigits(jid) : "");
+
     const created = await prisma.crmMessage.upsert({
       where: { waMessageId },
-      update: {
-        phone: phone || (isGroup ? toDigits(jid) : ""),
-        ownerId,
-        lineId,
-        direction: "out",
-        body: body || "",
-        msgType,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
-      create: {
-        phone: phone || (isGroup ? toDigits(jid) : ""),
-        ownerId,
-        lineId,
-        direction: "out",
-        body: body || "",
-        msgType,
-        waMessageId,
-        rawPayload: JSON.stringify(waData ?? null),
-      },
+      update: { phone: phoneToSave, ownerId, lineId, direction: "out", body: body || "", msgType, rawPayload: JSON.stringify(waData ?? null) },
+      create: { phone: phoneToSave, ownerId, lineId, direction: "out", body: body || "", msgType, waMessageId, rawPayload: JSON.stringify(waData ?? null) },
     });
 
-    const saved = {
-      id: created.waMessageId || created.id,
-      fromMe: true,
-      body: created.body || "",
-      timestamp: created.createdAt.toISOString(),
-      status: "sent" as const,
-      type: (created.msgType as any) || "text",
-      media: media ?? null,
-      senderName: undefined,
-      senderNumber: created.phone,
-      senderAvatar: null,
-    };
-
-    return NextResponse.json({ message: saved }, { status: 200 });
+    return NextResponse.json(
+      {
+        message: {
+          id: created.waMessageId || created.id,
+          fromMe: true,
+          body: created.body || "",
+          timestamp: created.createdAt.toISOString(),
+          status: "sent" as const,
+          type: (created.msgType as any) || "text",
+          media: media ?? null,
+          senderName: undefined,
+          senderNumber: created.phone,
+          senderAvatar: null,
+        },
+      },
+      { status: 200 }
+    );
   } catch (err: any) {
     console.error("[agent-portal/messages POST] Error interno", err);
     return NextResponse.json({ error: err?.message || "Error interno" }, { status: 500 });

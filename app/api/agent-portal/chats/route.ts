@@ -1,4 +1,3 @@
-// app/api/agent-portal/chats/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -6,10 +5,6 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL || "http://localhost:4002";
-
-if (!WA_SERVER_URL) {
-  console.warn("[agent-portal/chats] Falta WA_SERVER_URL en env");
-}
 
 export async function GET(req: NextRequest) {
   try {
@@ -23,7 +18,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 1) Buscar portal por token en Supabase
     const { data: portal, error } = await supabaseAdmin
       .from("agent_portals")
       .select("id, owner_user_id, mode, line_ids, enabled")
@@ -40,12 +34,7 @@ export async function GET(req: NextRequest) {
 
     if (!portal || portal.enabled === false) {
       return NextResponse.json(
-        {
-          ok: true,
-          lineId: null,
-          chats: [],
-          info: "Portal inexistente o deshabilitado",
-        },
+        { ok: true, lineId: null, chats: [], info: "Portal inexistente o deshabilitado" },
         { status: 200 }
       );
     }
@@ -54,25 +43,16 @@ export async function GET(req: NextRequest) {
 
     if (!Array.isArray(lineIds) || lineIds.length === 0) {
       return NextResponse.json(
-        {
-          ok: true,
-          lineId: null,
-          chats: [],
-          info: "Este portal aún no tiene líneas asignadas",
-        },
+        { ok: true, lineId: null, chats: [], info: "Este portal aún no tiene líneas asignadas" },
         { status: 200 }
       );
     }
 
-    // 2) Elegir línea: ?lineId= (si está en el portal) o la primera
     const lineIdParam = url.searchParams.get("lineId");
     const effectiveLineId =
       lineIdParam && lineIds.includes(lineIdParam) ? lineIdParam : lineIds[0];
 
-    // 3) Pedir chats al WA-SERVER
-    const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(
-      effectiveLineId
-    )}/chats`;
+    const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(effectiveLineId)}/chats`;
 
     const res = await fetch(waUrl, { cache: "no-store" });
     const text = await res.text();
@@ -93,20 +73,14 @@ export async function GET(req: NextRequest) {
             ok: true,
             lineId: effectiveLineId,
             chats: [],
-            info:
-              "La sesión de WhatsApp para esta línea no está conectada (Session not found).",
+            info: "La sesión de WhatsApp para esta línea no está conectada (Session not found).",
           },
           { status: 200 }
         );
       }
 
       return NextResponse.json(
-        {
-          ok: false,
-          error: "No se pudieron cargar los chats",
-          waStatus: res.status,
-          waBody: data,
-        },
+        { ok: false, error: "No se pudieron cargar los chats", waStatus: res.status, waBody: data },
         { status: 500 }
       );
     }
@@ -118,9 +92,7 @@ export async function GET(req: NextRequest) {
         c.id?._serialized || c.waChatId || c.id || String(c.chatId || "");
 
       const isGroup =
-        !!c.isGroup ||
-        rawId.endsWith("@g.us") ||
-        (c.id && String(c.id).includes("@g.us"));
+        !!c.isGroup || rawId.endsWith("@g.us") || (c.id && String(c.id).includes("@g.us"));
 
       let phone: string | null = null;
       if (!isGroup) {
@@ -144,19 +116,16 @@ export async function GET(req: NextRequest) {
           c.name ||
           c.pushname ||
           c.formattedTitle ||
-          (c.contact &&
-            (c.contact.name ||
-              c.contact.pushname ||
-              c.contact.shortName)) ||
+          (c.contact && (c.contact.name || c.contact.pushname || c.contact.shortName)) ||
           phone ||
           "Sin nombre"
         );
       })();
 
       return {
-        id: rawId, // ✅ se mantiene igual para no romper front
+        id: rawId,
         waChatId: rawId,
-        lineId: effectiveLineId, // ✅ IMPORTANTÍSIMO para buildPortalQuery()
+        lineId: effectiveLineId, // ✅ CLAVE
         name,
         isGroup,
         phone,
@@ -170,15 +139,9 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json(
-      { ok: true, lineId: effectiveLineId, chats },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, lineId: effectiveLineId, chats }, { status: 200 });
   } catch (e: any) {
     console.error("[agent-portal/chats] Excepción:", e);
-    return NextResponse.json(
-      { ok: false, error: "Error interno al cargar chats" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: "Error interno al cargar chats" }, { status: 500 });
   }
 }

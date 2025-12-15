@@ -18,48 +18,48 @@ model User {
   whatsappLines WhatsappLine[]
 
   // Relación con landings / páginas
-  pages         Page[]
+  pages Page[]
 
   // Relación con mensajes de CRM
-  crmMessages   CrmMessage[]
+  crmMessages CrmMessage[]
 }
 
 model WhatsappLine {
-  id           String     @id @default(cuid())
-  user         User       @relation(fields: [userId], references: [id])
-  userId       String
+  id     String @id @default(cuid())
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
 
-  name         String
-  phoneNumber  String?
-  sessionData  String?
-  status       String      @default("disconnected")
-  createdAt    DateTime    @default(now())
+  name        String
+  phoneNumber String?
+  sessionData String?
+  status      String   @default("disconnected")
+  createdAt   DateTime @default(now())
 
-  contacts     Contact[]
-  messages     Message[]
-  conversions  Conversion[]
-  pages        Page[]
+  contacts    Contact[]
+  messages    Message[]
+  conversions Conversion[]
+  pages       Page[]
 
   @@index([userId])
   @@index([status, createdAt])
 }
 
 model Contact {
-  id              String       @id @default(cuid())
-  whatsappLine    WhatsappLine @relation(fields: [whatsappLineId], references: [id])
-  whatsappLineId  String
+  id             String       @id @default(cuid())
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId String
 
-  phone           String
-  name            String?
-  avatarUrl       String?
-  firstContactAt  DateTime?
-  lastMessageAt   DateTime?
-  totalMessages   Int          @default(0)
-  createdAt       DateTime     @default(now())
+  phone          String
+  name           String?
+  avatarUrl      String?
+  firstContactAt DateTime?
+  lastMessageAt  DateTime?
+  totalMessages  Int       @default(0)
+  createdAt      DateTime  @default(now())
 
-  messages        Message[]
-  conversions     Conversion[]
-  events          Event[]
+  messages    Message[]
+  conversions Conversion[]
+  events      Event[]
 
   @@unique([whatsappLineId, phone])
   @@index([whatsappLineId])
@@ -67,72 +67,72 @@ model Contact {
 }
 
 model Message {
-  id             String       @id @default(cuid())
-  contact        Contact      @relation(fields: [contactId], references: [id])
-  contactId      String
+  id        String  @id @default(cuid())
+  contact   Contact @relation(fields: [contactId], references: [id])
+  contactId String
 
   whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
   whatsappLineId String
 
-  direction      String
-  body           String
-  mediaUrl       String?
-  isReceipt      Boolean      @default(false)
-  createdAt      DateTime     @default(now())
+  direction String
+  body      String
+  mediaUrl  String?
+  isReceipt Boolean  @default(false)
+  createdAt DateTime @default(now())
 
   @@index([contactId, createdAt])
   @@index([whatsappLineId, createdAt])
 }
 
 model Conversion {
-  id             String       @id @default(cuid())
-  contact        Contact      @relation(fields: [contactId], references: [id])
-  contactId      String
+  id        String  @id @default(cuid())
+  contact   Contact @relation(fields: [contactId], references: [id])
+  contactId String
 
   whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
   whatsappLineId String
 
-  amount         Float?
-  screenshotUrl  String?
-  createdAt      DateTime     @default(now())
+  amount        Float?
+  screenshotUrl String?
+  createdAt     DateTime @default(now())
 
   @@index([whatsappLineId, createdAt])
   @@index([contactId])
 }
 
 model Page {
-  id              String        @id @default(cuid())
-  user            User          @relation(fields: [userId], references: [id])
-  userId          String
+  id     String @id @default(cuid())
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
 
-  name            String
-  slug            String        @unique
-  config          String
-  whatsappLine    WhatsappLine? @relation(fields: [whatsappLineId], references: [id])
-  whatsappLineId  String?
+  name           String
+  slug           String        @unique
+  config         String
+  whatsappLine   WhatsappLine? @relation(fields: [whatsappLineId], references: [id])
+  whatsappLineId String?
 
   metaAccessToken String?
   metaPixelId     String?
-  published       Boolean       @default(false)
-  createdAt       DateTime      @default(now())
+  published       Boolean  @default(false)
+  createdAt       DateTime @default(now())
 
-  events          Event[]
+  events Event[]
 
   @@index([userId])
   @@index([whatsappLineId])
 }
 
 model Event {
-  id         String   @id @default(cuid())
-  page       Page?    @relation(fields: [pageId], references: [id])
-  pageId     String?
+  id     String  @id @default(cuid())
+  page   Page?   @relation(fields: [pageId], references: [id])
+  pageId String?
 
-  contact    Contact? @relation(fields: [contactId], references: [id])
-  contactId  String?
+  contact   Contact? @relation(fields: [contactId], references: [id])
+  contactId String?
 
-  type       String
-  metadata   String?
-  createdAt  DateTime @default(now())
+  type      String
+  metadata  String?
+  createdAt DateTime @default(now())
 
   @@index([pageId])
   @@index([contactId])
@@ -148,10 +148,10 @@ model PhoneProfile {
 }
 
 model CrmMessage {
-  id          String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  ownerId     String?
-  owner       User?    @relation(fields: [ownerId], references: [id])
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id])
 
   lineId      String?
   phone       String
@@ -162,7 +162,7 @@ model CrmMessage {
   rawPayload  String?
   createdAt   DateTime @default(now())
 
-  // === NUEVO: info de media guardada ===
+  // === media guardada (opcional) ===
   mediaDataUrl  String?
   mediaFileName String?
   mediaMimeType String?
@@ -170,14 +170,16 @@ model CrmMessage {
   @@index([phone])
   @@index([lineId])
   @@index([ownerId])
+  // ✅ recomendado para portal: ownerId + lineId + phone + orden por fecha
+  @@index([ownerId, lineId, phone, createdAt])
 }
 
 model AgentPortalLink {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  userId    String   // sólo guardamos el id del usuario
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id        String    @id @default(cuid())
+  token     String    @unique
+  userId    String
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
   expiresAt DateTime?
 
   @@index([userId])
