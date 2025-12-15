@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
+  // ✅ No uses output: "export" (rompe /api + Prisma)
+  // output: "export",
 };
 
-export default nextConfig;
+module.exports = nextConfig;
