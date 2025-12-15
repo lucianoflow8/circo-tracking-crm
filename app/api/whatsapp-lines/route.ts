@@ -1,144 +1,39 @@
-// app/api/whatsapp-lines/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { getCurrentUserId } from "@/lib/auth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const WA_SERVER_URL =
-  process.env.WA_SERVER_URL || "http://localhost:4002";
+export const dynamic = "force-dynamic";
 
-type LineDTO = {
-  id: string;
-  name: string;
-  phoneNumber: string | null;
-  status: string;
-  createdAt: string;
-};
-
-// Helper para preguntarle al WA-SERVER el estado real de la línea
-async function fetchWaServerStatus(lineId: string): Promise<{
-  status?: string;
-  phoneNumber?: string | null;
-} | null> {
-  if (!WA_SERVER_URL) return null;
-
+export async function GET(req: NextRequest) {
   try {
-    const res = await fetch(
-      `${WA_SERVER_URL}/lines/${lineId}/status`,
-      { method: "GET" }
-    );
+    // opcional: filtrar por owner (si querés)
+    const ownerId = req.nextUrl.searchParams.get("ownerId");
 
-    if (!res.ok) {
-      // 404 = session not found → la tratamos como desconectada
-      return null;
+    let q = supabaseAdmin
+      .from("wa_lines")
+      .select("id, owner_id, external_line_id, wa_phone, status, created_at, last_assigned_at")
+      .order("created_at", { ascending: false });
+
+    if (ownerId) q = q.eq("owner_id", ownerId);
+
+    const { data, error } = await q;
+
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    const json = await res.json().catch(() => ({} as any));
+    // devolvemos lineId = external_line_id (el que usa wa-server)
+    const lines = (data || []).map((r) => ({
+      id: r.external_line_id,          // <- este es el lineId real
+      ownerId: r.owner_id,
+      phoneNumber: r.wa_phone,
+      status: r.status,
+      createdAt: r.created_at,
+      lastAssignedAt: r.last_assigned_at,
+      _dbId: r.id,                     // uuid interno por si lo querés
+    }));
 
-    return {
-      status: json.status as string | undefined,
-      phoneNumber: json.phoneNumber as string | undefined,
-    };
-  } catch (e) {
-    console.error("[whatsapp-lines] Error consultando WA-SERVER:", e);
-    return null;
-  }
-}
-
-// ==========================
-//   GET  -> listar líneas
-// ==========================
-export async function GET(_req: NextRequest) {
-  try {
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    const lines = await prisma.whatsappLine.findMany({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-    });
-
-    const enriched: LineDTO[] = await Promise.all(
-      lines.map(async (l) => {
-        // Preguntamos al WA-SERVER si está conectada
-        const remote = await fetchWaServerStatus(l.id);
-
-        const status =
-          remote?.status ?? l.status ?? "disconnected";
-        const phoneNumber =
-          (remote?.phoneNumber as string | null | undefined) ??
-          l.phoneNumber ??
-          null;
-
-        return {
-          id: l.id,
-          name: l.name,
-          phoneNumber,
-          status,
-          createdAt: l.createdAt.toISOString(),
-        };
-      })
-    );
-
-    return NextResponse.json({ lines: enriched });
+    return NextResponse.json({ ok: true, lines });
   } catch (e: any) {
-    console.error("[whatsapp-lines] GET error:", e);
-    return NextResponse.json(
-      { error: e?.message || "Error al cargar las líneas" },
-      { status: 500 }
-    );
-  }
-}
-
-// ==========================
-//   POST -> crear línea
-// ==========================
-export async function POST(req: NextRequest) {
-  try {
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      return NextResponse.json(
-        { error: "No autenticado" },
-        { status: 401 }
-      );
-    }
-
-    const body = await req.json().catch(() => ({} as any));
-    const { name } = body || {};
-
-    if (!name || !String(name).trim()) {
-      return NextResponse.json(
-        { error: "El nombre es requerido" },
-        { status: 400 }
-      );
-    }
-
-    const line = await prisma.whatsappLine.create({
-      data: {
-        userId,
-        name: String(name).trim(),
-        status: "disconnected",
-      },
-    });
-
-    const dto: LineDTO = {
-      id: line.id,
-      name: line.name,
-      phoneNumber: line.phoneNumber,
-      status: line.status,
-      createdAt: line.createdAt.toISOString(),
-    };
-
-    return NextResponse.json({ line: dto });
-  } catch (e: any) {
-    console.error("[whatsapp-lines] POST error:", e);
-    return NextResponse.json(
-      { error: e?.message || "Error al crear la línea" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message || "error" }, { status: 500 });
   }
 }

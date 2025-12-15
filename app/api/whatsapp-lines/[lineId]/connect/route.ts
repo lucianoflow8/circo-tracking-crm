@@ -1,41 +1,49 @@
-import { NextResponse } from "next/server";
-import QRCode from "qrcode";
-import { getCurrentUserId } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const WA_SERVER_URL = process.env.WA_SERVER_URL!;
+export const dynamic = "force-dynamic";
 
 export async function POST(
-  request: Request,
-  context: { params: Promise<{ lineId: string }> }
+  req: NextRequest,
+  { params }: { params: { lineId: string } }
 ) {
-  const { lineId } = await context.params;
+  try {
+    const lineId = params.lineId; // este es external_line_id (cmj1...)
+    const WA_SERVER_URL = process.env.WA_SERVER_URL;
 
-  const ownerId = await getCurrentUserId();
-  if (!ownerId) {
-    return NextResponse.json({ error: "No autenticado" }, { status: 401 });
+    if (!WA_SERVER_URL) {
+      return NextResponse.json({ ok: false, error: "Falta WA_SERVER_URL en env" }, { status: 500 });
+    }
+
+    // 1) Conectar en el WA server
+    const r = await fetch(`${WA_SERVER_URL}/lines/${lineId}/connect`, { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      return NextResponse.json({ ok: false, error: data?.error || "Error conectando WA" }, { status: 500 });
+    }
+
+    // 2) Guardar/actualizar en Supabase wa_lines
+    const ownerId = process.env.WA_FALLBACK_OWNER_ID || null; // si querés fijo por ahora
+
+    const { error } = await supabaseAdmin
+      .from("wa_lines")
+      .upsert(
+        {
+          external_line_id: lineId,
+          owner_id: ownerId,
+          wa_phone: data?.phoneNumber || null,
+          status: data?.status || "connected",
+        },
+        { onConflict: "external_line_id" }
+      );
+
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, ...data });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || "error" }, { status: 500 });
   }
-
-  const resp = await fetch(`${WA_SERVER_URL}/lines/${lineId}/connect`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ownerId }),
-  });
-
-  const data = await resp.json().catch(() => ({} as any));
-
-  if (!resp.ok) {
-    return NextResponse.json(
-      { error: data.error || "Error conectando con WhatsApp" },
-      { status: 500 }
-    );
-  }
-
-  let qrImage: string | null = null;
-  if (data.qr) qrImage = await QRCode.toDataURL(data.qr);
-
-  return NextResponse.json({
-    status: data.status,
-    qr: qrImage,
-    phoneNumber: data.phoneNumber ?? null,
-  });
 }

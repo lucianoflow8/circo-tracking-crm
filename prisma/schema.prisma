@@ -132,7 +132,7 @@ model PhoneProfile {
 
 model CrmMessage {
   id            String   @id @default(cuid())
-  ownerId       String
+  ownerId       String?          // <- AHORA nullable
   lineId        String?
   phone         String
   direction     String
@@ -144,7 +144,8 @@ model CrmMessage {
   mediaDataUrl  String?
   mediaFileName String?
   mediaMimeType String?
-  owner         User     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  owner         User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull) // <- AHORA nullable
 
   @@unique([lineId, waMessageId], map: "CrmMessage_lineId_waMessageId_uniq")
   @@index([phone])

@@ -2,65 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// Fuerza runtime node (por las dudas)
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Payload = {
-  lineId?: string | null;
-  phone?: string | null;
-  direction?: "in" | "out" | string | null;
-  waMessageId?: string | null;
-  body?: string | null;
-  type?: string | null;
-  ts?: number | null;
-  media?: {
-    dataUrl?: string | null;
-    fileName?: string | null;
-    mimetype?: string | null;
-  } | null;
-};
-
-async function resolveOwnerId(lineId?: string | null) {
-  const fallback = process.env.WA_FALLBACK_OWNER_ID || null;
-  if (!lineId) return fallback;
-
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("wa_lines")
-      .select("owner_id")
-      .eq("external_line_id", String(lineId))
-      .maybeSingle();
-
-    if (error) {
-      console.error("[WEBHOOK] Supabase wa_lines error:", error.message);
-      return fallback;
-    }
-
-    return (data?.owner_id as string | undefined) || fallback;
-  } catch (e: any) {
-    console.error("[WEBHOOK] resolveOwnerId exception:", e?.message || e);
-    return fallback;
-  }
+function normPhone(raw: string) {
+  return String(raw || "").replace(/\D/g, "");
 }
 
-function parseMediaDataUrl(dataUrl?: string | null) {
-  if (!dataUrl) return null;
-  const m = String(dataUrl).match(/^data:(.+?);base64,(.+)$/);
-  if (!m) return null;
-  return { mime: m[1], b64: m[2] };
+function isPrismaUniqueError(e: any) {
+  return e?.code === "P2002";
 }
 
 export async function POST(req: NextRequest) {
-  let payload: Payload | null = null;
-
   try {
-    payload = (await req.json()) as Payload;
+    const payload = await req.json();
 
-    const lineId = payload?.lineId ? String(payload.lineId) : null;
-    const phone = payload?.phone ? String(payload.phone) : null;
-    const direction = payload?.direction ? String(payload.direction) : null;
-    const waMessageId = payload?.waMessageId ? String(payload.waMessageId) : null;
+    const externalLineId = payload?.lineId ? String(payload.lineId) : null; // <- cmj1...
+    const phone = payload?.phone ? normPhone(payload.phone) : "";
+    const direction = payload?.direction ? String(payload.direction) : "";
+    const waMessageId = payload?.waMessageId ? String(payload.waMessageId) : "";
+    const body = payload?.body != null ? String(payload.body) : null;
+    const msgType = payload?.type != null ? String(payload.type) : null;
+    const createdAt =
+      typeof payload?.ts === "number" && payload.ts > 0 ? new Date(payload.ts) : new Date();
 
     if (!phone || !direction || !waMessageId) {
       return NextResponse.json(
@@ -69,67 +32,68 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ownerId = await resolveOwnerId(lineId);
+    // ✅ ownerId sale de Supabase wa_lines (NO Prisma WhatsappLine)
+    let ownerId: string | null = null;
 
-    // Si no tenemos ownerId, NO rompemos. Devolvemos 202 y log.
-    if (!ownerId) {
-      console.warn("[WEBHOOK] ownerId ausente. Setear WA_FALLBACK_OWNER_ID en Vercel.", {
-        lineId,
-        phone,
-        waMessageId,
-      });
-      return NextResponse.json(
-        { ok: true, warning: "ownerId missing; skipped prisma insert" },
-        { status: 202 }
-      );
+    if (externalLineId) {
+      const { data, error } = await supabaseAdmin
+        .from("wa_lines")
+        .select("owner_id")
+        .eq("external_line_id", externalLineId)
+        .maybeSingle();
+
+      if (error) {
+        console.error("[WEBHOOK] wa_lines lookup error:", error.message);
+      }
+      ownerId = (data?.owner_id as string | null) || null;
     }
 
-    const createdAt =
-      typeof payload?.ts === "number" && payload.ts > 0 ? new Date(payload.ts) : new Date();
+    // fallback opcional
+    if (!ownerId && process.env.WA_FALLBACK_OWNER_ID) {
+      ownerId = String(process.env.WA_FALLBACK_OWNER_ID);
+    }
 
-    // Media opcional (si después querés soportarlo desde wa-server)
-    const mediaParsed = parseMediaDataUrl(payload?.media?.dataUrl ?? null);
+    if (!ownerId) {
+      console.warn("[WEBHOOK] ownerId no resuelto; skip save", { externalLineId, phone, waMessageId });
+      return NextResponse.json({ ok: true, skipped: true, reason: "ownerId_not_found" });
+    }
 
-    // Guardar en CrmMessage (upsert por waMessageId)
-    await prisma.crmMessage.upsert({
-      where: { waMessageId },
-      update: {
-        ownerId,
-        lineId: lineId ?? null,
-        phone,
-        direction,
-        body: payload?.body ?? null,
-        msgType: payload?.type ?? null,
-        rawPayload: JSON.stringify(payload),
-        createdAt,
+    // ✅ Guardar en CrmMessage
+    try {
+      await prisma.crmMessage.create({
+        data: {
+          ownerId,
+          lineId: externalLineId,
+          phone,
+          direction,
+          waMessageId,
+          body,
+          msgType,
+          rawPayload: JSON.stringify(payload),
+          createdAt,
+        },
+      });
+    } catch (e: any) {
+      if (!isPrismaUniqueError(e)) throw e;
 
-        mediaDataUrl: payload?.media?.dataUrl ?? null,
-        mediaFileName: payload?.media?.fileName ?? null,
-        mediaMimeType: payload?.media?.mimetype ?? mediaParsed?.mime ?? null,
-      },
-      create: {
-        ownerId,
-        lineId: lineId ?? null,
-        phone,
-        direction,
-        waMessageId,
-        body: payload?.body ?? null,
-        msgType: payload?.type ?? null,
-        rawPayload: JSON.stringify(payload),
-        createdAt,
-
-        mediaDataUrl: payload?.media?.dataUrl ?? null,
-        mediaFileName: payload?.media?.fileName ?? null,
-        mediaMimeType: payload?.media?.mimetype ?? mediaParsed?.mime ?? null,
-      },
-    });
+      await prisma.crmMessage.update({
+        where: { waMessageId },
+        data: {
+          ownerId,
+          lineId: externalLineId ?? undefined,
+          phone,
+          direction,
+          body,
+          msgType,
+          rawPayload: JSON.stringify(payload),
+          createdAt,
+        },
+      });
+    }
 
     return NextResponse.json({ ok: true });
-  } catch (err: any) {
-    console.error("[WEBHOOK] Error interno:", err?.message || err, { payload });
-    return NextResponse.json(
-      { ok: false, error: "Error interno en webhook" },
-      { status: 500 }
-    );
+  } catch (err) {
+    console.error("[WEBHOOK] Error:", err);
+    return NextResponse.json({ ok: false, error: "Error interno en webhook" }, { status: 500 });
   }
 }
