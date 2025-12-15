@@ -186,6 +186,14 @@ const buildPortalQuery = (token: string, chat?: ChatSummary | null) => {
   return qs ? `?${qs}` : "";
 };
 
+/** ✅ helper: agrega params cuando ya tenés un "?token=..." */
+const appendParams = (baseQs: string, extra: Record<string, string>) => {
+  const glue = baseQs ? "&" : "?";
+  const sp = new URLSearchParams();
+  Object.entries(extra).forEach(([k, v]) => sp.set(k, v));
+  return `${baseQs}${glue}${sp.toString()}`;
+};
+
 /* ========= Componente de chat para cajero ========= */
 
 function AgentChat() {
@@ -274,7 +282,7 @@ function AgentChat() {
     return () => clearInterval(interval);
   }, [token, activeChat?.id]);
 
-  // ====== FETCH MENSAJES (✅ con token + lineId) ======
+  // ====== FETCH MENSAJES (✅ con token + lineId + includeMedia=1) ======
   useEffect(() => {
     if (!activeChat) return;
 
@@ -286,7 +294,8 @@ function AgentChat() {
         if (first) setLoadingMessages(true);
         setError(null);
 
-        const q = buildPortalQuery(token, activeChat);
+        const qBase = buildPortalQuery(token, activeChat);
+        const q = appendParams(qBase, { includeMedia: "1", limit: "50" });
 
         const res = await fetch(
           `/api/agent-portal/chats/${encodeURIComponent(activeChat.id)}/messages${q}`,
@@ -398,8 +407,20 @@ function AgentChat() {
 
       const saved: Message | undefined = data.message;
 
+      // ✅ NO pisar media si vuelve null/undefined
       setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
+        prev.map((m) => {
+          if (m.id !== tempId) return m;
+          if (!saved) return { ...optimistic, status: "sent" };
+
+          return {
+            ...optimistic,
+            ...saved,
+            media: saved.media ?? optimistic.media ?? null,
+            type: (saved.type as any) ?? optimistic.type,
+            status: saved.status ?? "sent",
+          };
+        })
       );
     } catch (e: any) {
       console.error(e);
@@ -455,8 +476,20 @@ function AgentChat() {
 
       const saved: Message | undefined = data.message;
 
+      // ✅ NO pisar media si vuelve null/undefined
       setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? saved ?? { ...optimistic, status: "sent" } : m))
+        prev.map((m) => {
+          if (m.id !== tempId) return m;
+          if (!saved) return { ...optimistic, status: "sent" };
+
+          return {
+            ...optimistic,
+            ...saved,
+            media: saved.media ?? optimistic.media ?? null,
+            type: (saved.type as any) ?? optimistic.type,
+            status: saved.status ?? "sent",
+          };
+        })
       );
     } catch (e: any) {
       console.error(e);
@@ -535,7 +568,7 @@ function AgentChat() {
     reader.readAsDataURL(file);
   };
 
-  // ✅ crear grupo con token (y opcional lineId si quisieras, pero acá no aplica chat puntual)
+  // ✅ crear grupo con token
   const handleCreateGroup = async () => {
     const name = groupName.trim();
     if (!name) {
@@ -747,7 +780,13 @@ function AgentChat() {
                 {(() => {
                   const avatar = getAvatarFromChat(activeChat || undefined);
                   if (avatar) {
-                    return <img src={avatar} alt={getChatDisplayName(activeChat)} className="h-full w-full object-cover" />;
+                    return (
+                      <img
+                        src={avatar}
+                        alt={getChatDisplayName(activeChat)}
+                        className="h-full w-full object-cover"
+                      />
+                    );
                   }
                   const headerName = getChatDisplayName(activeChat);
                   return <span>{headerName[0] ?? "?"}</span>;
@@ -795,7 +834,11 @@ function AgentChat() {
                       <div className="mr-2 flex items-end">
                         <div className="h-7 w-7 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden text-[11px] font-semibold text-sky-300">
                           {msg.senderAvatar ? (
-                            <img src={msg.senderAvatar} alt={msg.senderName ?? "Contacto"} className="h-full w-full object-cover" />
+                            <img
+                              src={msg.senderAvatar}
+                              alt={msg.senderName ?? "Contacto"}
+                              className="h-full w-full object-cover"
+                            />
                           ) : (
                             <span>{senderInitial}</span>
                           )}
@@ -845,17 +888,21 @@ function AgentChat() {
                         </div>
                       )}
 
-                      {msg.media && msg.type && msg.type !== "image" && msg.type !== "document" && msg.type !== "audio" && (
-                        <a
-                          href={msg.media.dataUrl}
-                          download={msg.media.fileName || "archivo"}
-                          className="mb-1 flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] hover:bg-slate-800"
-                        >
-                          <span>📎</span>
-                          <span className="truncate">{msg.media.fileName || "Archivo adjunto"}</span>
-                          <span className="ml-auto text-[10px] text-slate-400">Descargar</span>
-                        </a>
-                      )}
+                      {msg.media &&
+                        msg.type &&
+                        msg.type !== "image" &&
+                        msg.type !== "document" &&
+                        msg.type !== "audio" && (
+                          <a
+                            href={msg.media.dataUrl}
+                            download={msg.media.fileName || "archivo"}
+                            className="mb-1 flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] hover:bg-slate-800"
+                          >
+                            <span>📎</span>
+                            <span className="truncate">{msg.media.fileName || "Archivo adjunto"}</span>
+                            <span className="ml-auto text-[10px] text-slate-400">Descargar</span>
+                          </a>
+                        )}
 
                       {renderedBody.trim() && <span className="whitespace-pre-wrap break-words">{renderedBody}</span>}
 
@@ -939,7 +986,11 @@ function AgentChat() {
               <div className="flex flex-col items-center gap-2">
                 <div className="h-14 w-14 rounded-full bg-slate-800 flex items-center justify-center overflow-hidden">
                   {groupAvatar ? (
-                    <img src={groupAvatar.dataUrl} alt={groupAvatar.fileName || "Grupo"} className="h-full w-full object-cover" />
+                    <img
+                      src={groupAvatar.dataUrl}
+                      alt={groupAvatar.fileName || "Grupo"}
+                      className="h-full w-full object-cover"
+                    />
                   ) : (
                     <span className="text-xl text-slate-300">👥</span>
                   )}
@@ -1043,7 +1094,12 @@ function AgentChat() {
                             toggleAdmin(c.id);
                           }}
                         >
-                          <input type="checkbox" checked={isAdmin} onChange={() => {}} className="h-3 w-3 rounded border-slate-500 bg-slate-900" />
+                          <input
+                            type="checkbox"
+                            checked={isAdmin}
+                            onChange={() => {}}
+                            className="h-3 w-3 rounded border-slate-500 bg-slate-900"
+                          />
                           <span>Admin</span>
                         </label>
                       </div>
