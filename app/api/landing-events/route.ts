@@ -1,3 +1,4 @@
+// app/api/landing-events/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import crypto from "crypto";
@@ -12,12 +13,11 @@ interface LandingEventPayload {
   landingId: string;
   buttonId?: string | null;
 
-  // WA-SERVER
   waPhone?: string | null;
   amount?: number | null;
   screenshotUrl?: string | null;
 
-  // Para eventos del WA-SERVER: viene external_line_id (cmj...)
+  // viene external_line_id (cmj...)
   waLineId?: string | null;
 }
 
@@ -47,7 +47,6 @@ async function resolveWaLineUuidFromExternal(externalLineId: string): Promise<st
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LandingEventPayload;
-
     const { eventType, landingId, buttonId, waPhone, amount, screenshotUrl, waLineId } = body;
 
     if (!landingId || !eventType) {
@@ -61,13 +60,11 @@ export async function POST(req: NextRequest) {
     const visitorIp = ipHeader.split(",")[0]?.trim() || null;
     const userAgent = req.headers.get("user-agent") || null;
 
-    // =========================================================
-    // 0) Resolver wa_line_id (DB) + guardar external para debug
-    // =========================================================
+    // 0) Resolver wa_line_id (DB UUID)
     let waLineExternalId: string | null = waLineId ?? null;
-    let waLineIdStored: string | null = null; // <-- ESTE va a la DB (ideal UUID)
+    let waLineIdStored: string | null = null; // UUID
 
-    // Rotación SOLO para click y SOLO si no vino waLineId
+    // Rotación SOLO para click si no vino waLineId
     if (!waLineExternalId && eventType === "click") {
       const { data: landing, error: landingError } = await supabaseAdmin
         .from("landing_pages")
@@ -75,9 +72,7 @@ export async function POST(req: NextRequest) {
         .eq("id", landingId)
         .maybeSingle();
 
-      if (landingError) {
-        console.error("[landing-events] Error leyendo landing_pages:", landingError.message);
-      }
+      if (landingError) console.error("[landing-events] landing_pages:", landingError.message);
 
       const ownerId = (landing as any)?.owner_id as string | undefined;
 
@@ -89,7 +84,7 @@ export async function POST(req: NextRequest) {
           .eq("status", "connected");
 
         if (linesError) {
-          console.error("[landing-events] Error leyendo wa_lines:", linesError.message);
+          console.error("[landing-events] wa_lines:", linesError.message);
         } else if (lines && lines.length > 0) {
           const sorted = [...lines].sort((a: any, b: any) => {
             const aTime = a.last_assigned_at ? new Date(a.last_assigned_at).getTime() : 0;
@@ -98,11 +93,9 @@ export async function POST(req: NextRequest) {
           });
 
           const chosen = sorted[0] as any;
-
           waLineExternalId = chosen.external_line_id || null;
           waLineIdStored = chosen.id || null;
 
-          // balance
           try {
             await supabaseAdmin
               .from("wa_lines")
@@ -113,13 +106,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Si vino waLineId del WA-SERVER (external cmj...), lo resolvemos a UUID
+    // Si vino cmj... lo resolvemos a UUID
     if (!waLineIdStored && waLineExternalId) {
-      if (isUuid(waLineExternalId)) {
-        waLineIdStored = waLineExternalId;
-      } else {
-        waLineIdStored = await resolveWaLineUuidFromExternal(waLineExternalId);
-      }
+      if (isUuid(waLineExternalId)) waLineIdStored = waLineExternalId;
+      else waLineIdStored = await resolveWaLineUuidFromExternal(waLineExternalId);
     }
 
     const safeAmount = safeNum(amount);
@@ -127,9 +117,6 @@ export async function POST(req: NextRequest) {
     const waPhoneToStore =
       eventType === "chat" || eventType === "conversion" ? (waPhone ?? null) : null;
 
-    // ========================
-    // 1) Guardar evento en DB
-    // ========================
     const { error } = await supabaseAdmin.from("landing_events").insert({
       landing_id: landingId,
       event_type: eventType,
@@ -139,22 +126,17 @@ export async function POST(req: NextRequest) {
       screenshot_url: screenshotUrl ?? null,
       visitor_ip: visitorIp,
       user_agent: userAgent,
-
-      // guardamos UUID si existe
       wa_line_id: waLineIdStored ?? null,
     });
 
     if (error) {
-      console.error("[landing-events] Error insertando evento:", error);
+      console.error("[landing-events] insert:", error);
       return NextResponse.json(
         { ok: false, error: `DB insert failed: ${error.message}`, code: (error as any).code || null },
         { status: 500 }
       );
     }
 
-    // ========================
-    // 2) Enviar a Meta CAPI (opcional)
-    // ========================
     if (eventType === "conversion" || eventType === "chat") {
       await sendMetaEvent({
         landingId,
@@ -176,9 +158,6 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/* ============================================================
-   Meta Conversions API
-   ============================================================ */
 async function sendMetaEvent(opts: {
   landingId: string;
   eventType: EventType;
@@ -197,7 +176,7 @@ async function sendMetaEvent(opts: {
       .maybeSingle();
 
     if (error) {
-      console.error("[META CAPI] Error leyendo landing_pages:", error.message);
+      console.error("[META CAPI] landing_pages:", error.message);
       return;
     }
     if (!landing) return;
@@ -260,11 +239,7 @@ async function sendMetaEvent(opts: {
     });
 
     const text = await res.text();
-    if (!res.ok) {
-      console.error(`[META CAPI] Error HTTP ${eventName}:`, res.status, text);
-    } else {
-      console.log(`[META CAPI] ${eventName} OK ->`, landingId, waPhone || null, amount ?? null);
-    }
+    if (!res.ok) console.error(`[META CAPI] Error HTTP ${eventName}:`, res.status, text);
   } catch (e) {
     console.error("[META CAPI] Excepción:", e);
   }
