@@ -1,9 +1,8 @@
+// app/api/landing-events/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
 type EventType = "visit" | "click" | "chat" | "conversion";
 
@@ -27,14 +26,9 @@ function safeNum(n: any) {
   return typeof n === "number" && !Number.isNaN(n) ? n : null;
 }
 
-export async function GET() {
-  return new NextResponse(null, { status: 405 });
-}
-
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LandingEventPayload;
-
     const { eventType, landingId, buttonId, waPhone, amount, screenshotUrl, waLineId } = body;
 
     if (!landingId || !eventType) {
@@ -51,14 +45,12 @@ export async function POST(req: NextRequest) {
     // =========================================================
     // 0) Resolver wa_line_id (MULTI-TENANT, CONSISTENTE)
     //
-    // IMPORTANTÍSIMO:
     // - visit: NO rota (no asigna línea)
     // - click: SÍ rota (si no vino waLineId)
     // - chat/conversion: viene del WA-SERVER con waLineId real
     // =========================================================
     let waLineIdToStore: string | null = waLineId ?? null;
 
-    // Rotación SOLO para click y SOLO si no vino waLineId desde el front
     if (!waLineIdToStore && eventType === "click") {
       const { data: landing, error: landingError } = await supabaseAdmin
         .from("landing_pages")
@@ -142,7 +134,11 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    // Respuesta compatible (no rompe tu front, pero agrega debug útil)
+    return NextResponse.json(
+      { ok: true, waLineId: waLineIdToStore ?? null },
+      { status: 200 }
+    );
   } catch (e: any) {
     console.error("[landing-events] Excepción:", e);
     return NextResponse.json({ ok: false, error: e?.message || "Error interno" }, { status: 500 });
