@@ -3,42 +3,35 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
-  id           String   @id @default(cuid())
-  name         String
-  email        String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
-
-  // Relación con líneas de WhatsApp (multi-línea)
+  id            String         @id @default(cuid())
+  name          String
+  email         String         @unique
+  passwordHash  String
+  createdAt     DateTime       @default(now())
+  crmMessages   CrmMessage[]
+  pages         Page[]
   whatsappLines WhatsappLine[]
-
-  // Relación con landings / páginas
-  pages Page[]
-
-  // Relación con mensajes de CRM
-  crmMessages CrmMessage[]
 }
 
 model WhatsappLine {
-  id     String @id @default(cuid())
-  user   User   @relation(fields: [userId], references: [id])
-  userId String
-
+  id          String       @id @default(cuid())
+  userId      String
   name        String
   phoneNumber String?
   sessionData String?
-  status      String   @default("disconnected")
-  createdAt   DateTime @default(now())
-
+  status      String       @default("disconnected")
+  createdAt   DateTime     @default(now())
   contacts    Contact[]
-  messages    Message[]
   conversions Conversion[]
+  messages    Message[]
   pages       Page[]
+  user        User         @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([status, createdAt])
@@ -46,93 +39,83 @@ model WhatsappLine {
 
 model Contact {
   id             String       @id @default(cuid())
-  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
   whatsappLineId String
-
   phone          String
   name           String?
   avatarUrl      String?
   firstContactAt DateTime?
   lastMessageAt  DateTime?
-  totalMessages  Int       @default(0)
-  createdAt      DateTime  @default(now())
-
-  messages    Message[]
-  conversions Conversion[]
-  events      Event[]
+  totalMessages  Int          @default(0)
+  createdAt      DateTime     @default(now())
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  conversions    Conversion[]
+  events         Event[]
+  messages       Message[]
 
   @@unique([whatsappLineId, phone])
+  @@unique([whatsappLineId, phone], map: "Contact_whatsappLineId_phone_uniq")
   @@index([whatsappLineId])
   @@index([lastMessageAt])
 }
 
 model Message {
-  id        String  @id @default(cuid())
-  contact   Contact @relation(fields: [contactId], references: [id])
-  contactId String
-
-  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  id             String       @id @default(cuid())
+  contactId      String
   whatsappLineId String
-
-  direction String
-  body      String
-  mediaUrl  String?
-  isReceipt Boolean  @default(false)
-  createdAt DateTime @default(now())
+  direction      String
+  body           String
+  mediaUrl       String?
+  isReceipt      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  contact        Contact      @relation(fields: [contactId], references: [id])
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
 
   @@index([contactId, createdAt])
   @@index([whatsappLineId, createdAt])
 }
 
 model Conversion {
-  id        String  @id @default(cuid())
-  contact   Contact @relation(fields: [contactId], references: [id])
-  contactId String
-
-  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
+  id             String       @id @default(cuid())
+  contactId      String
   whatsappLineId String
-
-  amount        Float?
-  screenshotUrl String?
-  createdAt     DateTime @default(now())
+  amount         Float?
+  screenshotUrl  String?
+  createdAt      DateTime     @default(now())
+  contact        Contact      @relation(fields: [contactId], references: [id])
+  whatsappLine   WhatsappLine @relation(fields: [whatsappLineId], references: [id])
 
   @@index([whatsappLineId, createdAt])
   @@index([contactId])
 }
 
 model Page {
-  id     String @id @default(cuid())
-  user   User   @relation(fields: [userId], references: [id])
-  userId String
-
-  name           String
-  slug           String        @unique
-  config         String
-  whatsappLine   WhatsappLine? @relation(fields: [whatsappLineId], references: [id])
-  whatsappLineId String?
-
+  id              String        @id @default(cuid())
+  userId          String
+  name            String
+  slug            String        @unique
+  config          String
+  whatsappLineId  String?
   metaAccessToken String?
   metaPixelId     String?
-  published       Boolean  @default(false)
-  createdAt       DateTime @default(now())
-
-  events Event[]
+  published       Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  events          Event[]
+  user            User          @relation(fields: [userId], references: [id])
+  whatsappLine    WhatsappLine? @relation(fields: [whatsappLineId], references: [id])
 
   @@index([userId])
   @@index([whatsappLineId])
 }
 
 model Event {
-  id     String  @id @default(cuid())
-  page   Page?   @relation(fields: [pageId], references: [id])
-  pageId String?
-
-  contact   Contact? @relation(fields: [contactId], references: [id])
+  id        String   @id @default(cuid())
+  pageId    String?
   contactId String?
-
   type      String
   metadata  String?
   createdAt DateTime @default(now())
+  contact   Contact? @relation(fields: [contactId], references: [id])
+  page      Page?    @relation(fields: [pageId], references: [id])
 
   @@index([pageId])
   @@index([contactId])
@@ -148,30 +131,25 @@ model PhoneProfile {
 }
 
 model CrmMessage {
-  id String @id @default(cuid())
-
-  ownerId String?
-  owner   User?   @relation(fields: [ownerId], references: [id])
-
-  lineId      String?
-  phone       String
-  direction   String
-  waMessageId String   @unique
-  body        String?
-  msgType     String?
-  rawPayload  String?
-  createdAt   DateTime @default(now())
-
-  // === media guardada (opcional) ===
+  id            String   @id @default(cuid())
+  ownerId       String
+  lineId        String?
+  phone         String
+  direction     String
+  waMessageId   String   @unique
+  body          String?
+  msgType       String?
+  rawPayload    String?
+  createdAt     DateTime @default(now())
   mediaDataUrl  String?
   mediaFileName String?
   mediaMimeType String?
+  owner         User     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
 
+  @@unique([lineId, waMessageId], map: "CrmMessage_lineId_waMessageId_uniq")
   @@index([phone])
   @@index([lineId])
   @@index([ownerId])
-  // ✅ recomendado para portal: ownerId + lineId + phone + orden por fecha
-  @@index([ownerId, lineId, phone, createdAt])
 }
 
 model AgentPortalLink {
@@ -183,4 +161,78 @@ model AgentPortalLink {
   expiresAt DateTime?
 
   @@index([userId])
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model agent_portals {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  token         String    @unique
+  owner_user_id String
+  mode          String    @default("single")
+  line_ids      String[]  @default([])
+  enabled       Boolean   @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+model landing_events {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  landing_id     String?        @db.Uuid
+  event_type     String
+  wa_phone       String?
+  amount         Decimal?       @db.Decimal
+  created_at     DateTime?      @default(now()) @db.Timestamptz(6)
+  button_id      String?
+  screenshot_url String?
+  visitor_ip     String?
+  landing_code   String?
+  user_agent     String?
+  updated_at     DateTime?      @default(now()) @db.Timestamptz(6)
+  wa_line_id     String?
+  landing_pages  landing_pages? @relation(fields: [landing_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model landing_lines {
+  landing_id          String        @db.Uuid
+  wa_line_external_id String
+  enabled             Boolean       @default(true)
+  created_at          DateTime      @default(now()) @db.Timestamptz(6)
+  landing_pages       landing_pages @relation(fields: [landing_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([landing_id, wa_line_external_id])
+}
+
+model landing_pages {
+  id                 String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  owner_id           String
+  internal_name      String?
+  slug               String?          @unique
+  wa_phone           String?
+  meta_access_token  String?
+  meta_pixel_id      String?
+  config             Json?            @default("{}")
+  published          Boolean?         @default(false)
+  created_at         DateTime?        @default(now()) @db.Timestamptz(6)
+  content            Json?            @default("{}")
+  wa_message         String?
+  updated_at         DateTime?        @default(now()) @db.Timestamptz(6)
+  wa_button_label    String?
+  wa_button_subtitle String?
+  landing_events     landing_events[]
+  landing_lines      landing_lines[]
+}
+
+model landing_rr_state {
+  landing_id String   @id @db.Uuid
+  rr_index   Int      @default(0)
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model wa_lines {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  owner_id         String
+  external_line_id String?   @unique
+  wa_phone         String?
+  status           String    @default("disconnected")
+  last_assigned_at DateTime? @db.Timestamptz(6)
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
 }

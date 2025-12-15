@@ -155,30 +155,31 @@ export async function POST(req: NextRequest) {
       typeof ts === "number" && ts > 0 ? new Date(ts) : new Date();
 
     // ====== 1) Guardar el mensaje en Prisma (CrmMessage) ======
-    await prisma.crmMessage.upsert({
-      where: { waMessageId },
-      update: {
-        ownerId: ownerId ?? undefined,
-        lineId: lineId ?? undefined,
-        phone,
-        direction,
-        body: body ?? undefined,
-        msgType: type ?? undefined,
-        rawPayload: JSON.stringify(payload),
-        createdAt,
-      },
-      create: {
-        ownerId,
-        lineId: lineId ?? null,
-        phone,
-        direction,
-        waMessageId,
-        body: body ?? null,
-        msgType: type ?? null,
-        rawPayload: JSON.stringify(payload),
-        createdAt,
-      },
-    });
+await prisma.crmMessage.upsert({
+  where: { waMessageId },
+  update: {
+    ownerId: ownerId ?? undefined,  // 'undefined' es permitido para actualización
+    lineId: lineId ?? undefined,    // 'undefined' es permitido para actualización
+    phone,
+    direction,
+    body: body ?? undefined,
+    msgType: type ?? undefined,
+    rawPayload: JSON.stringify(payload),
+    createdAt,
+  },
+  create: {
+    // Aquí no puedes usar 'undefined' para 'ownerId'
+    ownerId: ownerId ?? '', // Si ownerId es opcional y puede ser vacío, asegúrate de no pasar undefined
+    lineId: lineId ?? '',   // Similar a 'ownerId'
+    phone,
+    direction,
+    waMessageId,
+    body: body ?? '',
+    msgType: type ?? '',
+    rawPayload: JSON.stringify(payload),
+    createdAt,
+  },
+});
 
     // ====== 2) Evento de "chat" + Meta CAPI (multi-landing) ======
     try {
