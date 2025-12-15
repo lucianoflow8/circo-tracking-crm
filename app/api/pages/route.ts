@@ -13,10 +13,7 @@ export async function GET() {
   const ownerId = await getCurrentUserId();
 
   if (!ownerId) {
-    return NextResponse.json(
-      { error: "No autenticado" },
-      { status: 401 }
-    );
+    return NextResponse.json({ error: "No autenticado" }, { status: 401 });
   }
 
   const { data, error } = await supabase
@@ -27,24 +24,18 @@ export async function GET() {
 
   if (error) {
     console.error("GET /api/pages error", error);
-    return NextResponse.json(
-      { error: "Error al cargar páginas" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error al cargar páginas" }, { status: 500 });
   }
 
   return NextResponse.json({ pages: data ?? [] });
 }
 
-// POST: crea landing para el usuario logueado
+// POST: crea landing para el usuario logueado + la asocia a sus líneas (multiusuario automático)
 export async function POST(req: NextRequest) {
   const ownerId = await getCurrentUserId();
 
   if (!ownerId) {
-    return NextResponse.json(
-      { error: "No autenticado" },
-      { status: 401 }
-    );
+    return NextResponse.json({ error: "No autenticado" }, { status: 401 });
   }
 
   const body = await req.json();
@@ -64,10 +55,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const safeContent =
-    content && typeof content === "object" ? content : {};
+  const safeContent = content && typeof content === "object" ? content : {};
 
-  const { data, error } = await supabase
+  const { data: page, error } = await supabase
     .from("landing_pages")
     .insert({
       internal_name,
@@ -76,18 +66,40 @@ export async function POST(req: NextRequest) {
       wa_message: wa_message ?? null,
       meta_pixel_id: meta_pixel_id ?? null,
       meta_access_token: meta_access_token ?? null,
-      owner_id: ownerId, // 👈 acá se engancha al usuario
+      owner_id: ownerId, // 👈 multiusuario
     })
     .select("*")
     .single();
 
   if (error) {
     console.error("POST /api/pages error", error);
-    return NextResponse.json(
-      { error: "Error al crear página" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Error al crear página" }, { status: 500 });
   }
 
-  return NextResponse.json({ page: data });
+  // MULTIUSUARIO: asociar esta landing a TODAS las líneas del usuario
+  try {
+    const { data: lines, error: linesErr } = await supabase
+      .from("wa_lines")
+      .select("external_line_id")
+      .eq("owner_id", ownerId);
+
+    if (!linesErr && Array.isArray(lines) && lines.length) {
+      const rows = lines
+        .map((l) => l.external_line_id)
+        .filter(Boolean)
+        .map((externalLineId) => ({
+          landing_id: page.id,
+          wa_line_id: externalLineId, // guardamos el external_line_id (cmj...)
+          owner_id: ownerId,          // si tu landing_lines no tiene owner_id, borrá esta línea
+        }));
+
+      await supabase
+        .from("landing_lines")
+        .upsert(rows, { onConflict: "landing_id,wa_line_id" });
+    }
+  } catch (e: any) {
+    console.log("[pages] landing_lines upsert warn:", e?.message || e);
+  }
+
+  return NextResponse.json({ page });
 }

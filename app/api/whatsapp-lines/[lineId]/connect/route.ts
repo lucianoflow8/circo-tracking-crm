@@ -60,6 +60,31 @@ export async function POST(
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
+    // 3) MULTIUSUARIO: asegurar relación landing_lines
+    //    - a) todas las landings del usuario -> esta línea
+    //    - b) (opcional) si tu tabla landing_lines tiene owner_id, lo guardamos
+    try {
+      const { data: landings, error: landErr } = await supabaseAdmin
+        .from("landing_pages")
+        .select("id")
+        .eq("owner_id", userId);
+
+      if (!landErr && Array.isArray(landings) && landings.length) {
+        const rows = landings.map((l) => ({
+          landing_id: l.id,
+          wa_line_id: lineId,  // <- IMPORTANTE: acá guardamos el external_line_id (cmj...)
+          owner_id: userId,    // si tu tabla no tiene owner_id, borrá esta línea
+        }));
+
+        // Si tu constraint se llama distinto, ajustá onConflict según tu schema
+        await supabaseAdmin
+          .from("landing_lines")
+          .upsert(rows, { onConflict: "landing_id,wa_line_id" });
+      }
+    } catch (e: any) {
+      console.log("[connect] landing_lines sync warn:", e?.message || e);
+    }
+
     return NextResponse.json({ ok: true, ...data });
   } catch (e: any) {
     return NextResponse.json(
