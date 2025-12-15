@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { prisma } from "@/lib/prisma";
 import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { lineId: string } }
 ) {
   try {
@@ -16,35 +16,33 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "No autenticado" }, { status: 401 });
     }
 
-    const lineId = params.lineId; // id Prisma WhatsappLine (cuid)
+    const lineId = params.lineId; // external_line_id (cmj1...)
     const WA_SERVER_URL = process.env.WA_SERVER_URL;
+
     if (!WA_SERVER_URL) {
-      return NextResponse.json({ ok: false, error: "Falta WA_SERVER_URL" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "Falta WA_SERVER_URL en env" },
+        { status: 500 }
+      );
     }
 
-    // 1) Validar que esa línea exista y sea del usuario (multi-tenant)
-    const line = await prisma.whatsappLine.findFirst({
-      where: { id: lineId, userId },
-      select: { id: true },
-    });
-
-    if (!line) {
-      return NextResponse.json({ ok: false, error: "Línea inexistente o no te pertenece" }, { status: 403 });
-    }
-
-    // 2) Conectar en WA server PASANDO ownerId (CLAVE)
+    // 1) Conectar en el WA server ENVIANDO ownerId
     const r = await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ownerId: userId }),
     });
 
-    const data = await r.json().catch(() => ({}));
+    const data = await r.json().catch(() => ({} as any));
+
     if (!r.ok) {
-      return NextResponse.json({ ok: false, error: data?.error || "Error conectando WA" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: data?.error || "Error conectando WA" },
+        { status: 500 }
+      );
     }
 
-    // 3) Guardar/actualizar en Supabase wa_lines (owner_id = userId)
+    // 2) Asegurar fila en wa_lines (aunque phoneNumber venga null hasta "ready")
     const { error } = await supabaseAdmin
       .from("wa_lines")
       .upsert(
@@ -52,9 +50,8 @@ export async function POST(
           external_line_id: lineId,
           owner_id: userId,
           wa_phone: data?.phoneNumber || null,
-          status: data?.status || "connected",
+          status: data?.status || "connecting",
           updated_at: new Date().toISOString(),
-          last_assigned_at: new Date().toISOString(),
         },
         { onConflict: "external_line_id" }
       );
@@ -65,6 +62,9 @@ export async function POST(
 
     return NextResponse.json({ ok: true, ...data });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || "error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message || "error" },
+      { status: 500 }
+    );
   }
 }
