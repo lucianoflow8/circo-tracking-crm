@@ -1,4 +1,3 @@
-// app/api/pages/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getCurrentUserId } from "@/lib/auth";
@@ -39,10 +38,20 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { internal_name, slug, content, wa_message, meta_pixel_id, meta_access_token } = body || {};
+  const {
+    internal_name,
+    slug,
+    content,
+    wa_message,
+    meta_pixel_id,
+    meta_access_token,
+  } = body || {};
 
   if (!internal_name || !slug) {
-    return NextResponse.json({ error: "internal_name y slug son requeridos" }, { status: 400 });
+    return NextResponse.json(
+      { error: "internal_name y slug son requeridos" },
+      { status: 400 }
+    );
   }
 
   const safeContent = content && typeof content === "object" ? content : {};
@@ -56,7 +65,7 @@ export async function POST(req: NextRequest) {
       wa_message: wa_message ?? null,
       meta_pixel_id: meta_pixel_id ?? null,
       meta_access_token: meta_access_token ?? null,
-      owner_id: ownerId, // multiusuario
+      owner_id: ownerId,
     })
     .select("*")
     .single();
@@ -66,7 +75,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Error al crear página" }, { status: 500 });
   }
 
-  // MULTIUSUARIO: asociar esta landing a TODAS las líneas del usuario en landing_lines
+  // MULTIUSUARIO: asociar esta landing a TODAS las líneas del usuario
   try {
     const { data: lines, error: linesErr } = await supabase
       .from("wa_lines")
@@ -75,24 +84,17 @@ export async function POST(req: NextRequest) {
 
     if (!linesErr && Array.isArray(lines) && lines.length) {
       const rows = lines
-        .map((l: any) => String(l.external_line_id || ""))
+        .map((l) => l.external_line_id)
         .filter(Boolean)
-        .map((externalLineId: string) => ({
+        .map((externalLineId) => ({
           landing_id: page.id,
-          wa_line_external_id: externalLineId,
-          enabled: true,
+          wa_line_id: externalLineId, // guardamos el external_line_id (cmj...)
+          owner_id: ownerId,          // si tu landing_lines no tiene owner_id, borrá esta línea
         }));
 
-      if (rows.length) {
-        // Requiere UNIQUE (landing_id, wa_line_external_id). Si no lo tenés, igual no rompe: lo intentamos y listo.
-        const { error: upErr } = await supabase
-          .from("landing_lines")
-          .upsert(rows, { onConflict: "landing_id,wa_line_external_id" });
-
-        if (upErr) {
-          console.log("[pages] landing_lines upsert warn:", upErr.message);
-        }
-      }
+      await supabase
+        .from("landing_lines")
+        .upsert(rows, { onConflict: "landing_id,wa_line_id" });
     }
   } catch (e: any) {
     console.log("[pages] landing_lines upsert warn:", e?.message || e);
