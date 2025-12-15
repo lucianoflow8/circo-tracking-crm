@@ -3,7 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL || "http://localhost:4002";
-const DEFAULT_LINE_ID = process.env.WA_DEFAULT_LINE_ID || "";
 
 async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
   return await Promise.resolve(params);
@@ -56,7 +55,7 @@ function buildJidFromChatId(chatIdRaw: string) {
   if (chatId.includes("@g.us")) return { jid: chatId, phone: null, isGroup: true };
 
   if (chatId.includes("@c.us")) {
-    const phone = toDigits(chatId);
+    const phone = toDigits(chatId.split("@")[0]);
     return { jid: chatId, phone, isGroup: false };
   }
 
@@ -75,10 +74,16 @@ export async function GET(
     const token = url.searchParams.get("token") || "";
     const lineIdParam = url.searchParams.get("lineId");
 
+    // ✅ IMPORTANT: por default SIEMPRE intentamos traer media desde WA
+    const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get("limit") || "50", 10)));
+    const includeMedia = (url.searchParams.get("includeMedia") ?? "1").trim() || "1";
+
     if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    if (error || !portal) {
+      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    }
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
@@ -87,23 +92,26 @@ export async function GET(
     const { jid, phone, isGroup } = buildJidFromChatId(chatId);
     if (!jid) return NextResponse.json({ messages: [] }, { status: 200 });
 
+    const qs = new URLSearchParams({
+      limit: String(limit),
+      includeMedia, // ✅ esto es lo que faltaba
+    }).toString();
+
+    const waEndpoint =
+      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}` +
+      `/chats/${encodeURIComponent(jid)}/messages?${qs}`;
+
     // 1) WA-SERVER
     let waMessages: any[] | null = null;
 
     try {
-      let waRes = await fetch(
-        `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-        { cache: "no-store" }
-      );
+      let waRes = await fetch(waEndpoint, { cache: "no-store" });
 
       if (!waRes.ok) {
         const text = await waRes.text().catch(() => "");
         if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
           await ensureConnected(lineId, ownerId);
-          waRes = await fetch(
-            `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-            { cache: "no-store" }
-          );
+          waRes = await fetch(waEndpoint, { cache: "no-store" });
         }
       }
 
@@ -119,7 +127,9 @@ export async function GET(
     }
 
     if (waMessages && waMessages.length) {
-      waMessages.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      waMessages.sort(
+        (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      );
       return NextResponse.json({ messages: waMessages }, { status: 200 });
     }
 
@@ -135,7 +145,11 @@ export async function GET(
     const messages = rows.map((row) => {
       const r: any = row as any;
       const media = r.mediaDataUrl
-        ? { dataUrl: r.mediaDataUrl, fileName: r.mediaFileName || null, mimetype: r.mediaMimeType || "application/octet-stream" }
+        ? {
+            dataUrl: r.mediaDataUrl,
+            fileName: r.mediaFileName || null,
+            mimetype: r.mediaMimeType || "application/octet-stream",
+          }
         : null;
 
       return {
@@ -173,7 +187,9 @@ export async function POST(
     if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    if (error || !portal) {
+      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
+    }
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
@@ -200,7 +216,11 @@ export async function POST(
 
     let waRes = await fetch(
       `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, media, type: msgType }) }
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body, media, type: msgType }),
+      }
     );
 
     if (!waRes.ok) {
@@ -209,7 +229,11 @@ export async function POST(
         await ensureConnected(lineId, ownerId);
         waRes = await fetch(
           `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, media, type: msgType }) }
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ body, media, type: msgType }),
+          }
         );
       }
     }
@@ -223,15 +247,33 @@ export async function POST(
     const waData = await waRes.json().catch(() => null);
 
     const waMessageId: string =
-      (waData && (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
+      (waData &&
+        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     const phoneToSave = phone || (isGroup ? toDigits(jid) : "");
 
     const created = await prisma.crmMessage.upsert({
       where: { waMessageId },
-      update: { phone: phoneToSave, ownerId, lineId, direction: "out", body: body || "", msgType, rawPayload: JSON.stringify(waData ?? null) },
-      create: { phone: phoneToSave, ownerId, lineId, direction: "out", body: body || "", msgType, waMessageId, rawPayload: JSON.stringify(waData ?? null) },
+      update: {
+        phone: phoneToSave,
+        ownerId,
+        lineId,
+        direction: "out",
+        body: body || "",
+        msgType,
+        rawPayload: JSON.stringify(waData ?? null),
+      },
+      create: {
+        phone: phoneToSave,
+        ownerId,
+        lineId,
+        direction: "out",
+        body: body || "",
+        msgType,
+        waMessageId,
+        rawPayload: JSON.stringify(waData ?? null),
+      },
     });
 
     return NextResponse.json(
