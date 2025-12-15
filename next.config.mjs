@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // ✅ No uses output: "export" (rompe /api + Prisma)
+  // ✅ no uses output: "export"
   // output: "export",
 };
 
-module.exports = nextConfig;
+export default nextConfig;
