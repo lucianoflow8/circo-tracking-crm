@@ -1,8 +1,9 @@
-// app/api/landing-events/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type EventType = "visit" | "click" | "chat" | "conversion";
 
@@ -24,6 +25,10 @@ interface LandingEventPayload {
 
 function safeNum(n: any) {
   return typeof n === "number" && !Number.isNaN(n) ? n : null;
+}
+
+export async function GET() {
+  return new NextResponse(null, { status: 405 });
 }
 
 export async function POST(req: NextRequest) {
