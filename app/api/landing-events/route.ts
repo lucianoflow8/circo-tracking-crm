@@ -1,7 +1,9 @@
 // app/api/landing-events/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import crypto from "crypto";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type EventType = "visit" | "click" | "chat" | "conversion";
@@ -11,14 +13,12 @@ interface LandingEventPayload {
   landingId: string;
   buttonId?: string | null;
 
-  // teléfono del LEAD (jugador) -> SOLO chat/conversion (desde WA-SERVER)
+  // WA-SERVER
   waPhone?: string | null;
-
   amount?: number | null;
   screenshotUrl?: string | null;
 
-  // Para eventos del WA-SERVER (chat/conversion) mandamos external_line_id (cmj...)
-  // Para click, desde la landing también lo mandamos (para que coincida con el número rotado)
+  // Para eventos del WA-SERVER: viene external_line_id (cmj...)
   waLineId?: string | null;
 }
 
@@ -26,9 +26,29 @@ function safeNum(n: any) {
   return typeof n === "number" && !Number.isNaN(n) ? n : null;
 }
 
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+async function resolveWaLineUuidFromExternal(externalLineId: string): Promise<string | null> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("wa_lines")
+      .select("id")
+      .eq("external_line_id", externalLineId)
+      .maybeSingle();
+
+    if (error) return null;
+    return (data as any)?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LandingEventPayload;
+
     const { eventType, landingId, buttonId, waPhone, amount, screenshotUrl, waLineId } = body;
 
     if (!landingId || !eventType) {
@@ -43,15 +63,13 @@ export async function POST(req: NextRequest) {
     const userAgent = req.headers.get("user-agent") || null;
 
     // =========================================================
-    // 0) Resolver wa_line_id (MULTI-TENANT, CONSISTENTE)
-    //
-    // - visit: NO rota (no asigna línea)
-    // - click: SÍ rota (si no vino waLineId)
-    // - chat/conversion: viene del WA-SERVER con waLineId real
+    // 0) Resolver wa_line_id (DB) + guardar external para debug
     // =========================================================
-    let waLineIdToStore: string | null = waLineId ?? null;
+    let waLineExternalId: string | null = waLineId ?? null;
+    let waLineIdStored: string | null = null; // <-- ESTE va a la DB (ideal UUID)
 
-    if (!waLineIdToStore && eventType === "click") {
+    // Rotación SOLO para click y SOLO si no vino waLineId
+    if (!waLineExternalId && eventType === "click") {
       const { data: landing, error: landingError } = await supabaseAdmin
         .from("landing_pages")
         .select("id, owner_id")
@@ -81,9 +99,11 @@ export async function POST(req: NextRequest) {
           });
 
           const chosen = sorted[0] as any;
-          waLineIdToStore = (chosen.external_line_id as string) || null;
 
-          // marcar last_assigned_at para balancear
+          waLineExternalId = chosen.external_line_id || null;
+          waLineIdStored = chosen.id || null;
+
+          // balance
           try {
             await supabaseAdmin
               .from("wa_lines")
@@ -94,9 +114,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Si vino waLineId del WA-SERVER (external cmj...), lo resolvemos a UUID
+    if (!waLineIdStored && waLineExternalId) {
+      if (isUuid(waLineExternalId)) {
+        waLineIdStored = waLineExternalId;
+      } else {
+        waLineIdStored = await resolveWaLineUuidFromExternal(waLineExternalId);
+      }
+    }
+
     const safeAmount = safeNum(amount);
 
-    // waPhone SOLO si corresponde
     const waPhoneToStore =
       eventType === "chat" || eventType === "conversion" ? (waPhone ?? null) : null;
 
@@ -107,17 +135,22 @@ export async function POST(req: NextRequest) {
       landing_id: landingId,
       event_type: eventType,
       button_id: buttonId ?? null,
-      wa_phone: waPhoneToStore, // <-- LEAD (solo chat/conversion)
+      wa_phone: waPhoneToStore,
       amount: safeAmount,
       screenshot_url: screenshotUrl ?? null,
       visitor_ip: visitorIp,
       user_agent: userAgent,
-      wa_line_id: waLineIdToStore ?? null, // <-- external_line_id (cmj...)
+
+      // OJO: guardamos UUID si existe. Si no se pudo resolver, va null (no rompe insert)
+      wa_line_id: waLineIdStored ?? null,
     });
 
     if (error) {
       console.error("[landing-events] Error insertando evento:", error);
-      return NextResponse.json({ ok: false, error: "Error al guardar evento" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: `DB insert failed: ${error.message}`, code: (error as any).code || null },
+        { status: 500 }
+      );
     }
 
     // ========================
@@ -134,9 +167,8 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Respuesta compatible (no rompe tu front, pero agrega debug útil)
     return NextResponse.json(
-      { ok: true, waLineId: waLineIdToStore ?? null },
+      { ok: true, waLineIdStored: waLineIdStored ?? null, waLineExternalId: waLineExternalId ?? null },
       { status: 200 }
     );
   } catch (e: any) {
@@ -187,6 +219,13 @@ async function sendMetaEvent(opts: {
     if (visitorIp) user_data.client_ip_address = visitorIp;
     if (userAgent) user_data.client_user_agent = userAgent;
 
+    // ✅ HASH DEL TELÉFONO (mejor match)
+    const normalizedPhone = (waPhone || "").replace(/\D/g, "");
+    if (normalizedPhone) {
+      const hashedPhone = crypto.createHash("sha256").update(normalizedPhone).digest("hex");
+      user_data.ph = [hashedPhone];
+    }
+
     const custom_data: Record<string, any> = {};
     if (eventName === "Purchase" && typeof amount === "number" && amount > 0) {
       custom_data.value = amount;
@@ -207,7 +246,7 @@ async function sendMetaEvent(opts: {
         {
           event_name: eventName,
           event_time: eventTime,
-          action_source: "system_generated",
+          action_source: "chat",
           event_source_url,
           user_data,
           ...(Object.keys(custom_data).length ? { custom_data } : {}),
