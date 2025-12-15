@@ -10,9 +10,10 @@
     "lint": "eslint .",
     "generate": "prisma generate",
     "postinstall": "prisma generate",
-    "migrate:deploy": "prisma migrate deploy --schema=prisma/schema.prisma",
+
     "db:pull": "prisma db pull --schema=prisma/schema.prisma",
-    "db:push": "prisma db push --schema=prisma/schema.prisma"
+    "db:push": "prisma db push --schema=prisma/schema.prisma",
+    "migrate:deploy": "prisma migrate deploy --schema=prisma/schema.prisma"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
