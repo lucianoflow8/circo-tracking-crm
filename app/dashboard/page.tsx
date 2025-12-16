@@ -25,35 +25,22 @@ export default function DashboardPage() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Resumen (contactos / conversiones / revenue)
         const summaryRes = await fetch("/api/dashboard-summary");
         if (summaryRes.ok) {
           const json: DashboardSummary = await summaryRes.json();
           setSummary(json);
         } else {
-          console.error(
-            "Error /api/dashboard-summary",
-            summaryRes.status
-          );
+          console.error("Error /api/dashboard-summary", summaryRes.status);
         }
 
-        // Líneas de WhatsApp (aisladas por usuario en el backend)
         const linesRes = await fetch("/api/whatsapp-lines");
         if (linesRes.ok) {
           const json = await linesRes.json();
           const lines = (json.lines || []) as WhatsappLine[];
-
-          // si querés sólo las conectadas:
-          const connected = lines.filter(
-            (l) => l.status === "connected"
-          ).length;
-
+          const connected = lines.filter((l) => l.status === "connected").length;
           setLinesConnected(connected);
         } else {
-          console.error(
-            "Error /api/whatsapp-lines",
-            linesRes.status
-          );
+          console.error("Error /api/whatsapp-lines", linesRes.status);
         }
       } catch (e) {
         console.error("Error cargando datos de dashboard", e);
@@ -68,14 +55,12 @@ export default function DashboardPage() {
   const totalRevenue = summary?.totalRevenue ?? 0;
 
   return (
-    <main className="ct-dashboard-page">
-      {/* Header */}
+    <main className="ct-dashboard-page ct-dash-neo">
       <header className="ct-dashboard-header">
         <div>
-          <h1 className="ct-dashboard-title">Circo Tracking · Dashboard</h1>
+          <h1 className="ct-dashboard-title">FLOW CRM · MENU</h1>
           <p className="ct-dashboard-subtitle">
-            Visualizá y administrá todo lo importante de tu circo en un solo
-            lugar: líneas de WhatsApp, contactos, conversiones y páginas.
+            Visualizá y administrá todo lo importante: líneas, contactos, conversiones y páginas.
           </p>
         </div>
 
@@ -84,96 +69,72 @@ export default function DashboardPage() {
         </Link>
       </header>
 
-      {/* Tarjetas de resumen */}
       <section className="ct-dashboard-summary-grid">
-        {/* Líneas conectadas */}
         <div className="ct-summary-card">
           <p className="ct-summary-label">Líneas conectadas</p>
           <p className="ct-summary-value">{linesConnected}</p>
           <p className="ct-summary-helper">WhatsApp Web por QR</p>
         </div>
 
-        {/* Contactos totales */}
         <div className="ct-summary-card">
           <p className="ct-summary-label">Contactos totales</p>
           <p className="ct-summary-value">{totalContacts}</p>
-
           <p className="ct-summary-helper">
-            <Link
-              href="/contactos"
-              className="text-sky-400 hover:text-sky-300 hover:underline underline-offset-2"
-            >
-              Ver todos los contactos
+            <Link href="/contactos" className="ct-link">
+              Ver todos los contactos →
             </Link>
           </p>
         </div>
 
-        {/* Conversiones */}
         <div className="ct-summary-card">
           <p className="ct-summary-label">Conversiones</p>
           <p className="ct-summary-value">{totalConversions}</p>
-          <p className="ct-summary-helper">
-            Personas que enviaron comprobante.
-          </p>
-          <p className="ct-summary-helper" style={{ marginTop: "0.25rem" }}>
+          <p className="ct-summary-helper">Personas que enviaron comprobante.</p>
+          <p className="ct-summary-helper" style={{ marginTop: 6 }}>
             Ingresos totales:{" "}
-            <span className="text-emerald-400 font-semibold">
-              ${totalRevenue.toLocaleString("es-AR")}
-            </span>
+            <span className="ct-money">${totalRevenue.toLocaleString("es-AR")}</span>
           </p>
         </div>
       </section>
 
-      {/* Bloques principales */}
+      {/* 3 arriba + 1 abajo (wide) */}
       <section className="ct-dashboard-card-grid">
-        {/* Líneas */}
         <div className="ct-card">
           <h2 className="ct-card-title">Líneas de WhatsApp</h2>
           <p className="ct-card-text">
-            Administrá todas las líneas conectadas por QR. Desde acá vas a poder
-            ver los contactos, chats y conversiones de cada línea.
+            Administrá tus líneas conectadas por QR. Entrá para ver contactos, chats y conversiones.
           </p>
-          <button className="ct-card-btn">
-            <Link href="/whatsapp-lines">Ir a líneas</Link>
-          </button>
+          <Link href="/whatsapp-lines" className="ct-card-btn">
+            Ir a líneas
+          </Link>
         </div>
 
-        {/* Páginas */}
         <div className="ct-card">
           <h2 className="ct-card-title">Páginas (landing)</h2>
           <p className="ct-card-text">
-            Creá páginas personalizadas para tus campañas: fondo, textos, botón
-            de WhatsApp, pixel y token de acceso de Meta. Ideal para enviar
-            tráfico desde los anuncios.
+            Creá landings con botón de WhatsApp, pixel y token de Meta para campañas y tracking real.
           </p>
-          <button className="ct-card-btn">
-            <Link href="/pages">Ir a páginas</Link>
-          </button>
+          <Link href="/pages" className="ct-card-btn">
+            Ir a páginas
+          </Link>
         </div>
 
-        {/* Centro de mensajes */}
         <div className="ct-card">
           <h2 className="ct-card-title">Centro de mensajes</h2>
-          <p className="ct-card-text">
-            Respondé los mensajes de todas tus líneas en un solo lugar. Lista de
-            contactos a la izquierda y el chat completo a la derecha.
-          </p>
-          <button className="ct-card-btn">
-            <Link href="/chat">Ir a bandeja de mensajes</Link>
-          </button>
+          <p className="ct-card-text">Respondé mensajes de todas tus líneas en un solo lugar.</p>
+          <Link href="/chat" className="ct-card-btn">
+            Ir a bandeja
+          </Link>
         </div>
 
-        {/* Analytics */}
-        <div className="ct-card">
+        <div className="ct-card ct-card-wide">
           <h2 className="ct-card-title">Analytics</h2>
           <p className="ct-card-text">
-            Visualizá el rendimiento de tus páginas y líneas: vistas, clics al
-            botón, chats iniciados y conversiones. Gráficos claros para ver qué
-            está funcionando mejor.
+            Vistas, clics, chats y conversiones con métricas claras para decidir rápido.
           </p>
-          <button className="ct-card-btn">
-            <Link href="/analytics">Ver analytics</Link>
-          </button>
+          <Link href="/analytics" className="ct-card-btn">
+            Ver analytics
+          </Link>
         </div>
       </section>
     </main>
