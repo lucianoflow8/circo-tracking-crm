@@ -10,6 +10,16 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 
 const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
 
+// ✅ Lee el body UNA SOLA VEZ (evita: Body has already been read)
+async function readOnce(res: Response) {
+  const raw = await res.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = JSON.parse(raw);
+  } catch {}
+  return { raw, json };
+}
+
 async function ensureConnected(lineId: string, ownerId: string) {
   try {
     await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
@@ -94,7 +104,7 @@ export async function GET(
 
     const qs = new URLSearchParams({
       limit: String(limit),
-      includeMedia, // ✅ esto es lo que faltaba
+      includeMedia, // ✅ passthrough al WA-SERVER
     }).toString();
 
     const waEndpoint =
@@ -105,31 +115,32 @@ export async function GET(
     let waMessages: any[] | null = null;
 
     try {
-      let waRes = await fetch(waEndpoint, { cache: "no-store" });
+      let waRes: Response | null = await fetch(waEndpoint, { cache: "no-store" });
 
-      if (!waRes.ok) {
-        const text = await waRes.text().catch(() => "");
-        if (waRes.status === 404 && text.includes("Session not found") && ownerId) {
+      // Si falla, leemos una sola vez para decidir si reintentar
+      if (waRes && !waRes.ok) {
+        const { raw } = await readOnce(waRes);
+
+        if (waRes.status === 404 && raw.includes("Session not found") && ownerId) {
           await ensureConnected(lineId, ownerId);
           waRes = await fetch(waEndpoint, { cache: "no-store" });
+        } else {
+          console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, raw.slice(0, 300));
+          waRes = null;
         }
       }
 
-      if (waRes.ok) {
-        const waData = await waRes.json().catch(() => ({} as any));
-        waMessages = waData.messages || [];
-      } else {
-        const text = await waRes.text().catch(() => "");
-        console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, text.slice(0, 300));
+      if (waRes && waRes.ok) {
+        const { json } = await readOnce(waRes);
+        const arr = (json as any)?.messages;
+        waMessages = Array.isArray(arr) ? arr : [];
       }
     } catch (err) {
       console.error("[agent-portal/messages GET] Error llamando a WA-SERVER", err);
     }
 
     if (waMessages && waMessages.length) {
-      waMessages.sort(
-        (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      );
+      waMessages.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
       return NextResponse.json({ messages: waMessages }, { status: 200 });
     }
 
@@ -214,41 +225,45 @@ export async function POST(
       else msgType = "media";
     }
 
-    let waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body, media, type: msgType }),
-      }
-    );
+    const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`;
+
+    let waRes: Response = await fetch(waUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // ✅ compat: mandamos text + body (wa-server puede esperar text)
+      body: JSON.stringify({ text: body, body, media, type: msgType }),
+    });
 
     if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      if (waRes.status === 404 && text.includes("Session not found")) {
+      const { raw } = await readOnce(waRes);
+
+      if (waRes.status === 404 && raw.includes("Session not found")) {
         await ensureConnected(lineId, ownerId);
-        waRes = await fetch(
-          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ body, media, type: msgType }),
-          }
-        );
+        waRes = await fetch(waUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: body, body, media, type: msgType }),
+        });
+      } else {
+        console.error("[agent-portal/messages POST] WA-SERVER error", waRes.status, raw.slice(0, 300));
+        return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
       }
     }
 
     if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      console.error("[agent-portal/messages POST] WA-SERVER error", waRes.status, text);
+      const { raw } = await readOnce(waRes);
+      console.error("[agent-portal/messages POST] WA-SERVER error (retry)", waRes.status, raw.slice(0, 300));
       return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
     }
 
-    const waData = await waRes.json().catch(() => null);
+    const { json: waData } = await readOnce(waRes);
 
     const waMessageId: string =
       (waData &&
-        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
+        ((waData as any).message?.id?.id ||
+          (waData as any).message?.id ||
+          (waData as any).messageId ||
+          (waData as any).key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     const phoneToSave = phone || (isGroup ? toDigits(jid) : "");

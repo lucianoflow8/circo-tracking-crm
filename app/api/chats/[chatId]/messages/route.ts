@@ -1,4 +1,3 @@
-// app/api/chats/[chatId]/messages/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -11,6 +10,16 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 }
 
 const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
+
+// ✅ Lee el body UNA SOLA VEZ (evita: Body has already been read)
+async function readOnce(res: Response) {
+  const raw = await res.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = JSON.parse(raw);
+  } catch {}
+  return { raw, json };
+}
 
 /**
  * ✅ FIX MINIMO:
@@ -153,25 +162,28 @@ export async function GET(
     const [waMessagesRaw, dbRows] = await Promise.all([
       (async () => {
         try {
-          let waRes = await fetch(waUrl, { cache: "no-store" });
+          let waRes: Response = await fetch(waUrl, { cache: "no-store" });
 
-          // Session not found => autoconnect y retry
           if (!waRes.ok) {
-            const text = await waRes.text().catch(() => "");
-            if (waRes.status === 404 && text.includes("Session not found")) {
+            const { raw } = await readOnce(waRes);
+
+            if (waRes.status === 404 && raw.includes("Session not found")) {
               await ensureConnected(lineId, userId);
               waRes = await fetch(waUrl, { cache: "no-store" });
+            } else {
+              console.error("[MESSAGES GET] WA-SERVER error:", waRes.status, raw.slice(0, 200));
+              return [] as any[];
             }
           }
 
           if (!waRes.ok) {
-            const text = await waRes.text();
-            console.error("[MESSAGES GET] WA-SERVER error:", waRes.status, text.slice(0, 200));
+            const { raw } = await readOnce(waRes);
+            console.error("[MESSAGES GET] WA-SERVER error (retry):", waRes.status, raw.slice(0, 200));
             return [] as any[];
           }
 
-          const waData = await waRes.json().catch(() => ({} as any));
-          const arr = (waData?.messages ?? []) as any[];
+          const { json: waData } = await readOnce(waRes);
+          const arr = (waData as any)?.messages ?? [];
           return Array.isArray(arr) ? arr : [];
         } catch (err) {
           console.error("[MESSAGES GET] Error llamando WA-SERVER", err);
@@ -218,17 +230,17 @@ export async function GET(
     }
 
     for (const wm of waMessagesRaw) {
-      const rawId = wm?.id || wm?.waMessageId || wm?.key?.id;
+      const rawId = (wm as any)?.id || (wm as any)?.waMessageId || (wm as any)?.key?.id;
       if (!rawId) continue;
 
       const id = String(rawId);
       const prev = byId.get(id) || {};
 
       const tsIso =
-        typeof wm.timestamp === "string"
-          ? wm.timestamp
-          : wm.timestamp
-          ? new Date(wm.timestamp).toISOString()
+        typeof (wm as any).timestamp === "string"
+          ? (wm as any).timestamp
+          : (wm as any).timestamp
+          ? new Date((wm as any).timestamp).toISOString()
           : prev.timestamp || new Date().toISOString();
 
       byId.set(id, { ...prev, ...wm, id, timestamp: tsIso });
@@ -303,46 +315,47 @@ export async function POST(
       else msgType = "media";
     }
 
-    let waRes = await fetch(
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body, media, type: msgType }),
-      }
-    );
+    const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`;
+
+    let waRes: Response = await fetch(waUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // ✅ compat: mandamos text + body (wa-server puede esperar text)
+      body: JSON.stringify({ text: body, body, media, type: msgType }),
+    });
 
     // Session not found => autoconnect y retry 1 vez
     if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      if (waRes.status === 404 && text.includes("Session not found")) {
+      const { raw } = await readOnce(waRes);
+
+      if (waRes.status === 404 && raw.includes("Session not found")) {
         await ensureConnected(lineId, userId);
-        waRes = await fetch(
-          `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ body, media, type: msgType }),
-          }
-        );
+        waRes = await fetch(waUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: body, body, media, type: msgType }),
+        });
+      } else {
+        console.error("[MESSAGES POST] WA-SERVER error:", waRes.status, raw.slice(0, 200));
+        return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
       }
     }
 
     if (!waRes.ok) {
-      const text = await waRes.text().catch(() => "");
-      console.error("[MESSAGES POST] WA-SERVER error:", waRes.status, text.slice(0, 200));
+      const { raw } = await readOnce(waRes);
+      console.error("[MESSAGES POST] WA-SERVER error (retry):", waRes.status, raw.slice(0, 200));
       return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
     }
 
-    let waData: any = null;
-    try {
-      waData = await waRes.json();
-    } catch {}
+    const { json: waData } = await readOnce(waRes);
 
     // wa-server devuelve: { ok:true, message:{ id:"...", ... } }
     const waMessageId: string =
       (waData &&
-        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
+        ((waData as any).message?.id?.id ||
+          (waData as any).message?.id ||
+          (waData as any).messageId ||
+          (waData as any).key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // ✅ Guardar en CRMMessage SOLO si es chat individual (phone existe)
@@ -376,7 +389,7 @@ export async function POST(
       id: created?.waMessageId || waMessageId,
       fromMe: true,
       body: created?.body || body || "",
-      timestamp: (created?.createdAt ? created.createdAt.toISOString() : new Date().toISOString()),
+      timestamp: created?.createdAt ? created.createdAt.toISOString() : new Date().toISOString(),
       status: "sent" as const,
       type: (created?.msgType as any) || msgType || "text",
       media: media ?? null,
