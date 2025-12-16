@@ -47,16 +47,36 @@ function pickLineId(portal: any, lineIdParam: string | null) {
   return lineIds[0];
 }
 
+/**
+ * ✅ FIX: respeta JIDs @lid y NO los convierte a @c.us
+ */
 function buildJidFromChatId(chatIdRaw: string) {
-  const chatId = decodeURIComponent(chatIdRaw || "");
+  const chatId = decodeURIComponent(chatIdRaw || "").trim();
 
-  if (chatId.includes("@g.us")) return { jid: chatId, phone: null, isGroup: true };
+  if (!chatId) return { jid: "", phone: null as string | null, isGroup: false };
 
-  if (chatId.includes("@c.us")) {
+  // ✅ si ya viene como JID (incluye @lid), lo respetamos
+  if (chatId.includes("@")) {
+    const lower = chatId.toLowerCase();
+
+    if (lower.endsWith("@g.us")) return { jid: chatId, phone: null as string | null, isGroup: true };
+
+    if (lower.endsWith("@c.us")) {
+      const phone = toDigits(chatId.split("@")[0]);
+      return { jid: chatId, phone: phone || null, isGroup: false };
+    }
+
+    // ✅ CLAVE: NO convertir @lid a @c.us
+    if (lower.endsWith("@lid")) {
+      return { jid: chatId, phone: null as string | null, isGroup: false };
+    }
+
+    // Otros sufijos raros: igual lo dejamos tal cual
     const phone = toDigits(chatId.split("@")[0]);
-    return { jid: chatId, phone, isGroup: false };
+    return { jid: chatId, phone: phone || null, isGroup: false };
   }
 
+  // si viene solo número
   const phone = toDigits(chatId);
   return { jid: phone ? `${phone}@c.us` : "", phone: phone || null, isGroup: false };
 }

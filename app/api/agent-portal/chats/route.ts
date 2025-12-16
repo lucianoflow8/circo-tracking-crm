@@ -6,6 +6,32 @@ export const revalidate = 0;
 
 const WA_SERVER_URL = process.env.WA_SERVER_URL || "http://localhost:4002";
 
+// ✅ lee body una sola vez (evita problemas de stream)
+async function fetchWaOnce(url: string, init?: RequestInit) {
+  const res = await fetch(url, { cache: "no-store", ...(init || {}) } as any);
+  const raw = await res.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch {
+    json = null;
+  }
+  return { res, raw, json };
+}
+
+// ✅ si no existe sesión, intentamos crearla/conectarla y reintentar 1 vez
+async function ensureConnected(lineId: string, ownerId: string) {
+  try {
+    await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerId }),
+    }).catch(() => null);
+  } catch {}
+}
+
+const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
@@ -39,6 +65,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const ownerId = String((portal as any).owner_user_id || "");
     const lineIds: string[] = (portal as any).line_ids || [];
 
     if (!Array.isArray(lineIds) || lineIds.length === 0) {
@@ -54,20 +81,29 @@ export async function GET(req: NextRequest) {
 
     const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(effectiveLineId)}/chats`;
 
-    const res = await fetch(waUrl, { cache: "no-store" });
-    const text = await res.text();
+    // 1) llamo WA-SERVER
+    let first = await fetchWaOnce(waUrl);
 
-    let data: any = {};
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
+    // 2) si Session not found -> conecto y reintento 1 vez
+    const firstErr = first.json?.error || "";
+    if (
+      !first.res.ok &&
+      first.res.status === 404 &&
+      (first.raw.includes("Session not found") || firstErr === "Session not found") &&
+      ownerId
+    ) {
+      await ensureConnected(effectiveLineId, ownerId);
+      first = await fetchWaOnce(waUrl);
     }
 
-    if (!res.ok) {
-      console.error("[agent-portal/chats] Error WA-SERVER:", res.status, data);
+    if (!first.res.ok) {
+      console.error("[agent-portal/chats] Error WA-SERVER:", first.res.status, first.raw.slice(0, 300));
 
-      if (res.status === 404 && data?.error === "Session not found") {
+      // si sigue sin sesión, devolvemos vacío pero OK
+      if (
+        first.res.status === 404 &&
+        (first.raw.includes("Session not found") || (first.json?.error || "") === "Session not found")
+      ) {
         return NextResponse.json(
           {
             ok: true,
@@ -80,14 +116,22 @@ export async function GET(req: NextRequest) {
       }
 
       return NextResponse.json(
-        { ok: false, error: "No se pudieron cargar los chats", waStatus: res.status, waBody: data },
+        {
+          ok: false,
+          error: "No se pudieron cargar los chats",
+          waStatus: first.res.status,
+          waBody: first.json ?? { raw: first.raw },
+        },
         { status: 500 }
       );
     }
 
+    const data = first.json ?? {};
     const waChats: any[] = Array.isArray(data) ? data : data.chats || [];
+    // const waStatus = (Array.isArray(data) ? null : data.status) || null; // (opcional si lo querés)
 
     const chats = waChats.map((c) => {
+      // ✅ id tal cual viene (puede ser @c.us / @g.us / @lid)
       const rawId: string =
         c.id?._serialized || c.waChatId || c.id || String(c.chatId || "");
 
@@ -96,11 +140,12 @@ export async function GET(req: NextRequest) {
 
       let phone: string | null = null;
       if (!isGroup) {
-        const match =
-          rawId.match(/^(\d+)(@c\.us)?$/) ||
-          rawId.match(/^(\d+)(-|@)/) ||
-          rawId.match(/(\d+)/);
-        phone = match ? match[1] : null;
+        if (rawId.includes("@")) {
+          phone = toDigits(rawId.split("@")[0]);
+        } else {
+          const m = rawId.match(/(\d+)/);
+          phone = m ? m[1] : null;
+        }
       }
 
       const name = (() => {
@@ -142,6 +187,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, lineId: effectiveLineId, chats }, { status: 200 });
   } catch (e: any) {
     console.error("[agent-portal/chats] Excepción:", e);
-    return NextResponse.json({ ok: false, error: "Error interno al cargar chats" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "Error interno al cargar chats" },
+      { status: 500 }
+    );
   }
 }
