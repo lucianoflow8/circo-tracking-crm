@@ -10,16 +10,6 @@ async function unwrapParams<T>(params: T | Promise<T>): Promise<T> {
 
 const toDigits = (value: string | null | undefined) => (value || "").replace(/\D/g, "");
 
-// ✅ Lee el body UNA SOLA VEZ (evita: Body has already been read)
-async function readOnce(res: Response) {
-  const raw = await res.text().catch(() => "");
-  let json: any = null;
-  try {
-    json = JSON.parse(raw);
-  } catch {}
-  return { raw, json };
-}
-
 async function ensureConnected(lineId: string, ownerId: string) {
   try {
     await fetch(`${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/connect`, {
@@ -52,9 +42,7 @@ async function getPortalFromToken(token: string) {
 function pickLineId(portal: any, lineIdParam: string | null) {
   const lineIds: string[] = (portal?.line_ids || []) as string[];
 
-  // ✅ si no hay líneas, no usamos DEFAULT (evita mezclar)
   if (!Array.isArray(lineIds) || lineIds.length === 0) return null;
-
   if (lineIdParam && lineIds.includes(lineIdParam)) return lineIdParam;
   return lineIds[0];
 }
@@ -73,6 +61,22 @@ function buildJidFromChatId(chatIdRaw: string) {
   return { jid: phone ? `${phone}@c.us` : "", phone: phone || null, isGroup: false };
 }
 
+/**
+ * ✅ Lee el body UNA SOLA VEZ y parsea JSON desde el texto.
+ * Evita: "Body has already been read".
+ */
+async function fetchWaOnce(url: string, init?: RequestInit) {
+  const res = await fetch(url, { cache: "no-store", ...(init || {}) } as any);
+  const raw = await res.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch {
+    json = null;
+  }
+  return { res, raw, json };
+}
+
 export async function GET(
   req: NextRequest,
   context: { params: { chatId: string } | Promise<{ chatId: string }> }
@@ -84,16 +88,13 @@ export async function GET(
     const token = url.searchParams.get("token") || "";
     const lineIdParam = url.searchParams.get("lineId");
 
-    // ✅ IMPORTANT: por default SIEMPRE intentamos traer media desde WA
     const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get("limit") || "50", 10)));
     const includeMedia = (url.searchParams.get("includeMedia") ?? "1").trim() || "1";
 
     if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) {
-      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
-    }
+    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
@@ -104,7 +105,7 @@ export async function GET(
 
     const qs = new URLSearchParams({
       limit: String(limit),
-      includeMedia, // ✅ passthrough al WA-SERVER
+      includeMedia, // ✅ pedimos media al WA-SERVER
     }).toString();
 
     const waEndpoint =
@@ -112,36 +113,28 @@ export async function GET(
       `/chats/${encodeURIComponent(jid)}/messages?${qs}`;
 
     // 1) WA-SERVER
-    let waMessages: any[] | null = null;
-
     try {
-      let waRes: Response | null = await fetch(waEndpoint, { cache: "no-store" });
+      let first = await fetchWaOnce(waEndpoint);
 
-      // Si falla, leemos una sola vez para decidir si reintentar
-      if (waRes && !waRes.ok) {
-        const { raw } = await readOnce(waRes);
-
-        if (waRes.status === 404 && raw.includes("Session not found") && ownerId) {
-          await ensureConnected(lineId, ownerId);
-          waRes = await fetch(waEndpoint, { cache: "no-store" });
-        } else {
-          console.error("[agent-portal/messages GET] WA-SERVER error", waRes.status, raw.slice(0, 300));
-          waRes = null;
-        }
+      // Session not found -> conecto y retry 1 vez
+      if (!first.res.ok && first.res.status === 404 && first.raw.includes("Session not found") && ownerId) {
+        await ensureConnected(lineId, ownerId);
+        first = await fetchWaOnce(waEndpoint);
       }
 
-      if (waRes && waRes.ok) {
-        const { json } = await readOnce(waRes);
-        const arr = (json as any)?.messages;
-        waMessages = Array.isArray(arr) ? arr : [];
+      if (first.res.ok) {
+        const waMessages = first.json?.messages || [];
+        if (Array.isArray(waMessages) && waMessages.length) {
+          waMessages.sort(
+            (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+          );
+          return NextResponse.json({ messages: waMessages }, { status: 200 });
+        }
+      } else {
+        console.error("[agent-portal/messages GET] WA-SERVER error", first.res.status, first.raw.slice(0, 300));
       }
     } catch (err) {
-      console.error("[agent-portal/messages GET] Error llamando a WA-SERVER", err);
-    }
-
-    if (waMessages && waMessages.length) {
-      waMessages.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      return NextResponse.json({ messages: waMessages }, { status: 200 });
+      console.error("[agent-portal/messages GET] Error llamando WA-SERVER", err);
     }
 
     // 2) Fallback DB (solo individual)
@@ -198,19 +191,18 @@ export async function POST(
     if (!token) return NextResponse.json({ error: "Falta token" }, { status: 400 });
 
     const { portal, error } = await getPortalFromToken(token);
-    if (error || !portal) {
-      return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
-    }
+    if (error || !portal) return NextResponse.json({ error: error || "Token inválido" }, { status: 401 });
 
     const ownerId: string = portal.owner_user_id;
     const lineId = pickLineId(portal, lineIdParam);
     if (!lineId) return NextResponse.json({ error: "Portal sin líneas asignadas" }, { status: 400 });
 
     const bodyJson = await req.json().catch(() => ({} as any));
-    const { body, media } = bodyJson || {};
+    const text = String(bodyJson?.body || bodyJson?.text || "").trim();
+    const media = bodyJson?.media;
 
-    if ((!body || typeof body !== "string") && !media) {
-      return NextResponse.json({ error: "Se requiere body (texto) o media" }, { status: 400 });
+    if (!text && !media) {
+      return NextResponse.json({ error: "Se requiere body/text (texto) o media" }, { status: 400 });
     }
 
     const { jid, phone, isGroup } = buildJidFromChatId(chatId);
@@ -227,55 +219,44 @@ export async function POST(
 
     const waUrl = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/chats/${encodeURIComponent(jid)}/messages`;
 
-    let waRes: Response = await fetch(waUrl, {
+    let first = await fetchWaOnce(waUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // ✅ compat: mandamos text + body (wa-server puede esperar text)
-      body: JSON.stringify({ text: body, body, media, type: msgType }),
+      body: JSON.stringify({ body: text, text, media, type: msgType }),
     });
 
-    if (!waRes.ok) {
-      const { raw } = await readOnce(waRes);
-
-      if (waRes.status === 404 && raw.includes("Session not found")) {
-        await ensureConnected(lineId, ownerId);
-        waRes = await fetch(waUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: body, body, media, type: msgType }),
-        });
-      } else {
-        console.error("[agent-portal/messages POST] WA-SERVER error", waRes.status, raw.slice(0, 300));
-        return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
-      }
+    if (!first.res.ok && first.res.status === 404 && first.raw.includes("Session not found")) {
+      await ensureConnected(lineId, ownerId);
+      first = await fetchWaOnce(waUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: text, text, media, type: msgType }),
+      });
     }
 
-    if (!waRes.ok) {
-      const { raw } = await readOnce(waRes);
-      console.error("[agent-portal/messages POST] WA-SERVER error (retry)", waRes.status, raw.slice(0, 300));
+    if (!first.res.ok) {
+      console.error("[agent-portal/messages POST] WA-SERVER error", first.res.status, first.raw.slice(0, 300));
       return NextResponse.json({ error: "Error al enviar mensaje a WA-SERVER" }, { status: 500 });
     }
 
-    const { json: waData } = await readOnce(waRes);
+    const waData = first.json || null;
 
     const waMessageId: string =
       (waData &&
-        ((waData as any).message?.id?.id ||
-          (waData as any).message?.id ||
-          (waData as any).messageId ||
-          (waData as any).key?.id)) ||
+        (waData.message?.id?.id || waData.message?.id || waData.messageId || waData.key?.id)) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    const phoneToSave = phone || (isGroup ? toDigits(jid) : "");
+    // Guardado DB (si es grupo no forzamos phone)
+    const phoneToSave = phone || (isGroup ? "" : "");
 
-    const created = await prisma.crmMessage.upsert({
+    await prisma.crmMessage.upsert({
       where: { waMessageId },
       update: {
         phone: phoneToSave,
         ownerId,
         lineId,
         direction: "out",
-        body: body || "",
+        body: text || "",
         msgType,
         rawPayload: JSON.stringify(waData ?? null),
       },
@@ -284,7 +265,7 @@ export async function POST(
         ownerId,
         lineId,
         direction: "out",
-        body: body || "",
+        body: text || "",
         msgType,
         waMessageId,
         rawPayload: JSON.stringify(waData ?? null),
@@ -294,15 +275,15 @@ export async function POST(
     return NextResponse.json(
       {
         message: {
-          id: created.waMessageId || created.id,
+          id: waMessageId,
           fromMe: true,
-          body: created.body || "",
-          timestamp: created.createdAt.toISOString(),
+          body: text || "",
+          timestamp: new Date().toISOString(),
           status: "sent" as const,
-          type: (created.msgType as any) || "text",
+          type: msgType,
           media: media ?? null,
           senderName: undefined,
-          senderNumber: created.phone,
+          senderNumber: phoneToSave || null,
           senderAvatar: null,
         },
       },
