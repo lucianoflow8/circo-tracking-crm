@@ -103,14 +103,15 @@ export async function GET(
     const { jid, phone, isGroup } = buildJidFromChatId(chatId);
     if (!jid) return NextResponse.json({ messages: [] }, { status: 200 });
 
+    // ✅ CANONICAL WA ENDPOINT (evita alias y asegura chatId por query)
     const qs = new URLSearchParams({
+      chatId: jid,
       limit: String(limit),
-      includeMedia, // ✅ pedimos media al WA-SERVER
+      includeMedia, // "1" por default
+      mediaMax: "20",
     }).toString();
 
-    const waEndpoint =
-      `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}` +
-      `/chats/${encodeURIComponent(jid)}/messages?${qs}`;
+    const waEndpoint = `${WA_SERVER_URL}/lines/${encodeURIComponent(lineId)}/messages?${qs}`;
 
     // 1) WA-SERVER
     try {
@@ -124,12 +125,43 @@ export async function GET(
 
       if (first.res.ok) {
         const waMessages = first.json?.messages || [];
-        if (Array.isArray(waMessages) && waMessages.length) {
-          waMessages.sort(
-            (a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-          );
-          return NextResponse.json({ messages: waMessages }, { status: 200 });
+        const waStatus = first.json?.status;
+
+        // ✅ si WA responde pero no connected, NO caemos al fallback DB
+        if (waStatus && waStatus !== "connected") {
+          return NextResponse.json({ messages: [], status: waStatus }, { status: 200 });
         }
+
+        if (Array.isArray(waMessages) && waMessages.length) {
+          // ✅ mapeo robusto (WA-SERVER devuelve "ts", tu UI usa "timestamp")
+          const mapped = waMessages.map((m: any) => {
+            const ts =
+              typeof m?.ts === "number"
+                ? m.ts
+                : m?.timestamp
+                ? new Date(m.timestamp).getTime()
+                : Date.now();
+
+            return {
+              id: m?.id,
+              fromMe: !!m?.fromMe,
+              body: m?.body || "",
+              timestamp: new Date(ts).toISOString(),
+              type: m?.type || "text",
+              media: m?.media || null,
+              senderName: undefined,
+              senderNumber: phone || null,
+              senderAvatar: null,
+              status: m?.status || undefined,
+            };
+          });
+
+          mapped.sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+          return NextResponse.json({ messages: mapped }, { status: 200 });
+        }
+
+        // ✅ si WA ok pero no hay mensajes, devolvemos vacío (sin DB)
+        return NextResponse.json({ messages: [] }, { status: 200 });
       } else {
         console.error("[agent-portal/messages GET] WA-SERVER error", first.res.status, first.raw.slice(0, 300));
       }
@@ -137,7 +169,7 @@ export async function GET(
       console.error("[agent-portal/messages GET] Error llamando WA-SERVER", err);
     }
 
-    // 2) Fallback DB (solo individual)
+    // 2) Fallback DB (solo individual) — solo si WA-SERVER no respondió bien
     if (isGroup || !phone) return NextResponse.json({ messages: [] }, { status: 200 });
 
     const rows = await prisma.crmMessage.findMany({
