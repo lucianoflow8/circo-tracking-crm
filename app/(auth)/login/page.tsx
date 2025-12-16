@@ -22,9 +22,7 @@ export default function LoginPage() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
 
@@ -36,7 +34,6 @@ export default function LoginPage() {
         return;
       }
 
-      // Login OK → al dashboard
       router.push('/dashboard');
     } catch (err) {
       console.error(err);
@@ -46,52 +43,61 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="auth-page">
-      <div className="auth-card">
-        <div className="auth-badge">Circo Tracking · CRM</div>
+    <main className="matrix-hero">
+      <div className="matrix-wrap">
+        <Link href="/" className="auth-back">
+         
+        </Link>
 
-        <h1 className="auth-title">Iniciar sesión</h1>
-        <p className="auth-subtitle">
-          Accedé a tu panel para gestionar líneas de WhatsApp, contactos,
-          conversiones y páginas de tu circo.
-        </p>
+        <section className="auth-center">
+          <div className="auth-simple-card">
+            <div className="auth-mask-wrap" aria-hidden="true">
+              <img className="auth-mask" src="/anon.png" alt="" />
+            </div>
 
-        <form onSubmit={handleSubmit} className="auth-form">
-          <label className="auth-label">
-            Email
-            <input
-              type="email"
-              className="auth-input"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="tuemail@circo.com"
-            />
-          </label>
+            <h1 className="auth-simple-title">Bienvenido de nuevo</h1>
+            <p className="auth-simple-subtitle">Inicia sesión tu panel de control</p>
 
-          <label className="auth-label">
-            Contraseña
-            <input
-              type="password"
-              className="auth-input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Tu contraseña"
-            />
-          </label>
+            <form onSubmit={handleSubmit} className="auth-form auth-simple-form">
+              <label className="auth-label auth-simple-label">
+                Email
+                <input
+                  type="email"
+                  className="auth-input auth-simple-input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="flowtracking@crm.com"
+                  autoComplete="email"
+                />
+              </label>
 
-          {error && <p className="auth-error">{error}</p>}
+              <label className="auth-label auth-simple-label">
+                Contraseña
+                <input
+                  type="password"
+                  className="auth-input auth-simple-input"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                />
+              </label>
 
-          <button type="submit" className="auth-button" disabled={loading}>
-            {loading ? 'Ingresando…' : 'Iniciar sesión'}
-          </button>
-        </form>
+              {error && <p className="auth-error auth-simple-error">{error}</p>}
 
-        <p className="auth-footer-text">
-          ¿Todavía no tenés cuenta?{' '}
-          <Link href="/register" className="auth-footer-link">
-            Crear cuenta
-          </Link>
-        </p>
+              <button type="submit" className="auth-button auth-nuclear-btn" disabled={loading}>
+                {loading ? 'Ingresando…' : 'Iniciar sesión'}
+              </button>
+            </form>
+
+            <p className="auth-footer-text auth-simple-footer">
+              ¿No tenés una cuenta?{' '}
+              <Link href="/register" className="auth-footer-link auth-simple-link">
+                Registrate aquí
+              </Link>
+            </p>
+          </div>
+        </section>
       </div>
     </main>
   );
